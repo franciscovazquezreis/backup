@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "configure" ] && command -v python3 >/dev/null 2>&1; then
+    python3 -m compileall -q /usr/share/salvaguarda >/dev/null 2>&1 || true
+fi
+
+exit 0

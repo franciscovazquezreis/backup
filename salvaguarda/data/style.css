@@ -1,0 +1,145 @@
+/* Salvaguarda: uses the colours of the active theme, so it follows light and dark modes. */
+
+.sg-page {
+  padding: 18px 18px 24px 18px;
+}
+
+.sg-hero-title {
+  font-size: 1.75em;
+  font-weight: 800;
+}
+
+.sg-title {
+  font-size: 1.25em;
+  font-weight: bold;
+}
+
+.sg-heading {
+  font-weight: bold;
+}
+
+.sg-section-title {
+  font-weight: bold;
+  font-size: 1.05em;
+  margin-top: 6px;
+}
+
+.sg-dim {
+  opacity: 0.68;
+}
+
+.sg-small {
+  font-size: 0.9em;
+}
+
+.sg-card {
+  background-color: @theme_base_color;
+  border: 1px solid alpha(@borders, 0.9);
+  border-radius: 12px;
+  padding: 14px 16px;
+}
+
+list.sg-boxed-list {
+  background-color: @theme_base_color;
+  border: 1px solid alpha(@borders, 0.9);
+  border-radius: 12px;
+}
+
+list.sg-boxed-list > row {
+  padding: 9px 14px;
+  border-bottom: 1px solid alpha(@borders, 0.55);
+}
+
+list.sg-boxed-list > row:last-child {
+  border-bottom-width: 0;
+}
+
+list.sg-boxed-list > row:first-child {
+  border-top-left-radius: 12px;
+  border-top-right-radius: 12px;
+}
+
+list.sg-boxed-list > row:last-child {
+  border-bottom-left-radius: 12px;
+  border-bottom-right-radius: 12px;
+}
+
+.sg-group-header {
+  padding: 10px 14px 4px 14px;
+  font-weight: bold;
+  font-size: 0.9em;
+  opacity: 0.75;
+}
+
+.sg-big-button {
+  padding: 10px 30px;
+  font-size: 1.1em;
+  font-weight: bold;
+  border-radius: 999px;
+}
+
+.sg-pill {
+  border-radius: 999px;
+  padding: 6px 18px;
+}
+
+.sg-badge {
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 0.82em;
+  font-weight: bold;
+  background-color: alpha(@theme_selected_bg_color, 0.16);
+  color: @theme_selected_bg_color;
+}
+
+.sg-success {
+  color: #26a269;
+}
+
+.sg-warning {
+  color: #c27d00;
+}
+
+.sg-error {
+  color: #c01c28;
+}
+
+.sg-status-icon {
+  opacity: 0.9;
+}
+
+.sg-path {
+  font-family: monospace;
+  font-size: 0.9em;
+}
+
+progressbar.sg-progress trough,
+progressbar.sg-progress progress {
+  min-height: 10px;
+  border-radius: 999px;
+}
+
+levelbar.sg-level trough,
+levelbar.sg-level block {
+  min-height: 6px;
+  border-radius: 999px;
+}
+
+levelbar.sg-level block.sg-normal {
+  background-color: @theme_selected_bg_color;
+  border-color: transparent;
+}
+
+levelbar.sg-level block.sg-warn {
+  background-color: #e5a50a;
+  border-color: transparent;
+}
+
+levelbar.sg-level block.sg-crit {
+  background-color: #e01b24;
+  border-color: transparent;
+}
+
+.sg-issue-list {
+  background-color: @theme_base_color;
+}

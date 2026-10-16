@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.franciscovazquezreis.Salvaguarda</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Salvaguarda</name>
+  <summary>Cópias de segurança simples e fiéis para um disco externo</summary>
+  <developer id="io.github.franciscovazquezreis">
+    <name>franciscovazquezreis</name>
+  </developer>
+  <description>
+    <p>
+      A Salvaguarda copia as pastas que escolheres para um disco externo, com um clique.
+      Os ficheiros ficam guardados tal e qual, com as mesmas pastas, datas e permissões,
+      para voltarem ao sítio certo depois de formatares o computador.
+    </p>
+    <ul>
+      <li>Só copia o que mudou desde a última vez.</li>
+      <li>O que apagares ou alterares fica em «Versões anteriores», com limpeza automática.</li>
+      <li>Conhece as configurações das apps mais comuns: navegadores, e-mail, chaves SSH e GPG, editores de código e assistentes de IA.</li>
+      <li>Nos projetos de programação, deixa de fora node_modules, ambientes virtuais e outras pastas que se recriam.</li>
+      <li>Restauro guiado, mesmo para um utilizador com outro nome ou noutro idioma.</li>
+      <li>Funciona sem internet e não precisa de conta.</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.franciscovazquezreis.Salvaguarda.desktop</launchable>
+  <url type="homepage">https://github.com/franciscovazquezreis/backup</url>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="1.0.0" date="2026-10-16">
+      <description>
+        <p>Primeira versão.</p>
+      </description>
+    </release>
+  </releases>
+</component>

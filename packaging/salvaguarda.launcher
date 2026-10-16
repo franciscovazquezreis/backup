@@ -1,0 +1,9 @@
+#!/usr/bin/python3
+"""Launcher installed as /usr/bin/salvaguarda by the .deb package."""
+import sys
+
+sys.path.insert(0, "/usr/share/salvaguarda")
+
+from salvaguarda.__main__ import main  # noqa: E402
+
+sys.exit(main())

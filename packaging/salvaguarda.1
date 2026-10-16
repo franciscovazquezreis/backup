@@ -1,0 +1,36 @@
+.TH SALVAGUARDA 1 "outubro de 2026" "Salvaguarda 1.0.0" "Comandos do utilizador"
+.SH NOME
+salvaguarda \- cópias de segurança simples para um disco externo
+.SH SINOPSE
+.B salvaguarda
+.RB [ \-\-copiar ]
+.RB [ \-\-versao ]
+.SH DESCRIÇÃO
+A Salvaguarda copia as pastas escolhidas (pastas pessoais, projetos de programação e
+configurações de apps) para um disco externo, mantendo a estrutura de pastas, as datas e as
+permissões. Cada cópia só transfere o que mudou; o que for apagado ou substituído no
+computador passa para a pasta \(FoVersões anteriores\(Fc do disco.
+.PP
+Sem opções, abre a janela da aplicação.
+.SH OPÇÕES
+.TP
+.B \-\-copiar
+Faz a cópia sem abrir a janela, para o primeiro disco de cópias que estiver ligado. Útil num
+atalho de teclado. Termina com o código 0 (concluída), 1 (concluída com avisos) ou 2 (não
+concluída).
+.TP
+.B \-\-versao
+Mostra a versão e termina.
+.SH FICHEIROS
+.TP
+.I ~/.config/salvaguarda/config.json
+O que copiar, discos e definições.
+.TP
+.I ~/.local/state/salvaguarda/historico.json
+Histórico das cópias e restauros.
+.TP
+.I <disco>/Salvaguarda/LEIA\-ME.txt
+Como está organizado o disco e como restaurar sem a aplicação.
+.SH VER TAMBÉM
+.BR rsync (1),
+.BR cp (1)

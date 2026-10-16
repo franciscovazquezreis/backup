@@ -1,0 +1,7 @@
+salvaguarda (1.0.0) unstable; urgency=medium
+
+  * Primeira versão: cópia em espelho com versões anteriores, catálogo de
+    configurações de apps, exclusões para projetos de programação, restauro
+    guiado e cópia portátil da app no disco.
+
+ -- franciscovazquezreis <franciscovazquezreis@users.noreply.github.com>  Fri, 16 Oct 2026 17:00:00 +0100
