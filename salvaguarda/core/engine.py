@@ -842,10 +842,10 @@ class BackupEngine:
             if d_st is None:
                 continue
             if name in excluded_names:
-                stats.newly_excluded += 1
                 if self._defer_shrink and not p.dry:
-                    self._protect(child_dst)
+                    self._protect(child_dst)  # stays until the window asks
                     continue
+                stats.newly_excluded += 1
                 self._archive(child_dst, d_st, src, excluded=True)
             else:
                 self._archive(child_dst, d_st, src, removed=True)
@@ -1260,7 +1260,12 @@ class BackupEngine:
             parts.append("{} {} em «Versões anteriores»".format(
                 fmt.plural(kept, "ficheiro antigo", "ficheiros antigos"),
                 fmt.agree(kept, "guardado", "guardados")))
-        text = "; ".join(parts) + "." if parts else "Cópia atualizada (só datas e permissões)."
+        if parts:
+            text = "; ".join(parts) + "."
+        elif self._defer_shrink:
+            text = "Já estava tudo copiado."  # the note says what is still to decide
+        else:
+            text = "Cópia atualizada (só datas e permissões)."
         if status == STATUS_WARNINGS:
             text += " Há {} a rever.".format(fmt.plural(len(self.issues), "aviso", "avisos"))
         return text[:1].upper() + text[1:]

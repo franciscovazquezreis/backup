@@ -597,6 +597,10 @@ class UpgradeSafetyTests(SandboxTestCase):
         self.assertEqual(self.find_in_versions(".codex/log/codex-tui.log"), [])
         self.assertTrue(any("Abre a Salvaguarda" in n for n in result.notes))
         self.assertEqual(self.layout.read_meta()["versao_app"], "1.0.0")
+        with mock.patch("sys.stdout"):
+            again = self.backup(_TerminalCallbacks(False), meta_extra={"versao_app": "1.1.0"})
+        self.assertEqual(again.message, "Já estava tudo copiado.")
+        self.assertEqual(again.stats.newly_excluded, 0)
         cb = RecordingCallbacks({"upgrade_shrink": "continue"})
         self.assertEqual(self.backup(cb, meta_extra={"versao_app": "1.1.0"}).status, STATUS_OK)
         self.assertEqual([q.kind for q in cb.questions], ["upgrade_shrink"])
