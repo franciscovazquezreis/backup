@@ -1136,8 +1136,9 @@ def history_elsewhere(project: Project) -> bool:
     """A copied worktree whose commits live in a main repository that is not copied, with
     commits that are on no remote: the copy holds the files but not that history."""
     g = project.git
-    return bool(project.covered and project.commits_elsewhere and g is not None
-                and (g.unpushed or g.commits or g.stashes))
+    # Counts unknown (no git, out of time): a worktree always has commits of its own there.
+    return bool(project.covered and project.commits_elsewhere
+                and (g is None or not g.checked or g.unpushed or g.commits or g.stashes))
 
 
 def in_backup(project: Project) -> bool:

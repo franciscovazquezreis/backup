@@ -24,7 +24,8 @@ from .engine import (PHASE_COPY, PHASE_FINISH, PHASE_PREPARE, PHASE_SCAN, PROGRE
                      STATUS_CANCELLED, STATUS_FAILED, STATUS_NOTHING, STATUS_OK, STATUS_WARNINGS,
                      Callbacks, Issue, Progress)
 from .fileops import Cancelled, EntryError, Fatal
-from .layout import CURRENT_DIR, EXTRAS_DIR, HOME_DIR, OTHER_DIR, TMP_PREFIX
+from .layout import (CURRENT_DIR, DISK_MARKER, EXTRAS_DIR, HOME_DIR, OTHER_DIR, TMP_PREFIX,
+                     VERSIONS_DIR)
 
 CONFLICT_REPLACE = "replace"
 CONFLICT_SKIP = "skip"
@@ -140,6 +141,24 @@ def items_for_tree(tree_root: str, meta: Dict[str, object]) -> List[RestoreItem]
 
     # Anything in the tree that the metadata does not describe (old disks, version folders).
     extra_items: List[RestoreItem] = []
+
+    def describe_rest(rel: str, path: str, label_prefix: str) -> None:
+        """Partially described folder (e.g. ".config" when only ".config/Code/User" was
+        selected): describe what is left, going down to the described source."""
+        try:
+            children = sorted(os.scandir(path), key=lambda e: e.name.lower())
+        except OSError:
+            return
+        for child in children:
+            child_rel = os.path.join(rel, child.name)
+            if child.name.startswith(TMP_PREFIX) or any(
+                    paths.is_inside(child_rel, c) for c in covered):
+                continue
+            if is_covered(child_rel):
+                describe_rest(child_rel, child.path, label_prefix)
+            else:
+                extra_items.append(_generic_item(child_rel, label_prefix, child))
+
     for top, label_prefix in ((HOME_DIR, "~/"), (OTHER_DIR, "/")):
         base = os.path.join(tree_root, top)
         try:
@@ -159,17 +178,7 @@ def items_for_tree(tree_root: str, meta: Dict[str, object]) -> List[RestoreItem]
                 except OSError:
                     continue
             if is_covered(rel):
-                # Partially described (e.g. ".config" when only ".config/Code/User" was
-                # selected): describe the uncovered children one level down.
-                try:
-                    children = sorted(os.scandir(entry.path), key=lambda e: e.name.lower())
-                except OSError:
-                    continue
-                for child in children:
-                    child_rel = os.path.join(rel, child.name)
-                    if is_covered(child_rel) or child.name.startswith(TMP_PREFIX):
-                        continue
-                    extra_items.append(_generic_item(child_rel, label_prefix, child))
+                describe_rest(rel, entry.path, label_prefix)
                 continue
             extra_items.append(_generic_item(rel, label_prefix, entry))
     extras_dir = os.path.join(tree_root, EXTRAS_DIR)
@@ -225,20 +234,44 @@ def _overlaps(a: str, b: str) -> bool:
 
 
 def snap_warnings(items: List[RestoreItem], remaps: Dict[str, variants.Remap],
-                  probe: Optional[variants.Probe] = None) -> Dict[str, str]:
-    """Rels restored to their own place inside ~/snap/<x>/current while that snap never
-    ran here: snapd needs a link there, so the restore leaves them out (warning)."""
+                  probe: Optional[variants.Probe] = None,
+                  tree_root: Optional[str] = None) -> Dict[str, str]:
+    """Rels that would restore into ~/snap/<x>/current while that folder does not exist
+    here (the snap never ran): snapd needs a link there, so the restore leaves them out.
+    With ``tree_root``, items holding the whole ~/snap or ~/snap/<x> count too."""
     probe = probe or variants.Probe(paths.home())
+    home = paths.home()
     out: Dict[str, str] = {}
+
+    def missing(snap: str) -> bool:
+        return not os.path.lexists(os.path.join(home, "snap", snap, "current"))
+
     for item in items:
         for rel in item.rels:
             parts = rel.split("/", 1)
             if rel in remaps or parts[0] != HOME_DIR or len(parts) < 2:
                 continue
             snap = variants.snap_user_dir_problem(parts[1], probe)
-            if snap:
+            if snap and missing(snap):
                 out[rel] = variants.snap_warning(snap)
+                continue
+            match = re.match(r"^snap(?:/([^/]+))?$", parts[1])
+            if match and tree_root is not None:
+                base = os.path.join(tree_root, rel)
+                names = [match.group(1)] if match.group(1) else _listdir(base)
+                for name in names:
+                    folder = os.path.join(tree_root, HOME_DIR, "snap", name, "current")
+                    if os.path.isdir(folder) and not os.path.islink(folder) and missing(name):
+                        out[rel] = variants.snap_warning(name)
+                        break
     return out
+
+
+def _listdir(path: str) -> List[str]:
+    try:
+        return sorted(os.listdir(path))
+    except OSError:
+        return []
 
 
 class Destinations:
@@ -266,13 +299,26 @@ class Destinations:
             if key in new_xdg and old.startswith("~/") and len(old) > 2:
                 self.xdg_map[old[2:]] = new_xdg[key]
 
-    def keep_apart(self, tree_root: str) -> None:
+    def keep_apart(self, tree_root: str, meta: Optional[Dict[str, Any]] = None) -> None:
         """An old XDG folder ("Documentos") is not moved onto a folder that the same copy
-        also holds ("Documents", chosen on its own): the two would mix on every restore."""
+        also holds ("Documents", chosen on its own): the two would mix on every restore.
+        The copy is the tree being restored, its «Cópia atual» and the items the metadata
+        lists, so a version folder sends each file where «Cópia atual» would."""
+        trees = [tree_root]
+        current = _current_of(tree_root)
+        if current and current != tree_root:
+            trees.append(current)
+        listed = []
+        for source in (meta or {}).get("fontes") or []:
+            if isinstance(source, dict) and isinstance(source.get("copia"), str):
+                listed.append(source["copia"])
         for old in list(self.xdg_map):
             new_rel = os.path.relpath(self.xdg_map[old], self.home)
-            if new_rel != old and not new_rel.startswith("..") and os.path.lexists(
-                    os.path.join(tree_root, HOME_DIR, new_rel)):
+            if new_rel == old or new_rel.startswith(".."):
+                continue
+            target = HOME_DIR + "/" + new_rel.replace(os.sep, "/")
+            if any(os.path.lexists(os.path.join(t, HOME_DIR, new_rel)) for t in trees) or any(
+                    rel != HOME_DIR and _overlaps(rel, target) for rel in listed):
                 del self.xdg_map[old]
 
     def moved_folders(self, old_home: str) -> List[Tuple[str, str]]:
@@ -378,12 +424,15 @@ class RestoreEngine:
         self._replaced_used = False
         self._snap_reported: Set[str] = set()
         self._settings_partial = False
+        # Bytes each file system receives (device -> [existing path, bytes]), from the plan.
+        self._space: Dict[int, List[Any]] = {}
+        self._aside_bytes = 0
         self._last_emit = 0.0
         self._speed_t0 = 0.0
         self._speed_b0 = 0
         self._dest = Destinations(target, folder, self.meta,
                                   {rel: r.destination for rel, r in self.remaps.items()}, items)
-        self._dest.keep_apart(tree_root)
+        self._dest.keep_apart(tree_root, self.meta)
         self._link_pairs = self._dest.moved_folders(self.old_home)
         self.tolerance_ns = 2_000_000_000
 
@@ -431,6 +480,11 @@ class RestoreEngine:
             if self.target == TARGET_FOLDER:
                 if not self.folder:
                     raise Fatal("Escolhe a pasta onde queres restaurar.")
+                # Inside the copies, the restore would write into what it reads (copying
+                # itself again at every level) or change another copy of the disk.
+                if paths.is_inside(os.path.realpath(self.folder), _copies_root(self.tree_root)):
+                    raise Fatal("A pasta escolhida está dentro da cópia. Escolhe outra pasta "
+                                "para restaurar.")
                 os.makedirs(self.folder, exist_ok=True)
             self._set_phase(PHASE_SCAN, "A comparar com o que já existe…")
             self.dry = True
@@ -490,13 +544,27 @@ class RestoreEngine:
         return text[:1].upper() + text[1:]
 
     def _check_space(self, plan: RestoreStats) -> None:
-        base = self.folder if self.target == TARGET_FOLDER else paths.home()
-        usage = fsinfo.usage(base)
-        needed = plan.bytes_copied + 50 * 1000 * 1000
-        if usage is not None and usage.free < needed:
-            raise fileops.DiskFull(
-                "Não há espaço suficiente neste computador: são precisos {} e há {} livres."
-                .format(fmt.size(needed), fmt.size(usage.free)))
+        if not self._space:
+            self._charge(self.folder if self.target == TARGET_FOLDER else paths.home(),
+                         plan.bytes_copied, 0)
+        for base, size in self._space.values():
+            usage = fsinfo.usage(base)
+            needed = size + 50 * 1000 * 1000
+            if usage is not None and usage.free < needed:
+                raise fileops.DiskFull(
+                    "Não há espaço suficiente neste computador: são precisos {} e há {} livres."
+                    .format(fmt.size(needed), fmt.size(usage.free)))
+
+    def _charge(self, dst: str, size: int, aside: int) -> None:
+        """Count the planned bytes on the file system ``dst`` is on (a data partition,
+        a folder linked to another disk), and what is set aside where it is kept."""
+        device, base = _filesystem(dst)
+        if device is not None:
+            self._space.setdefault(device, [base, 0])[1] += size
+        if aside:
+            aside_device, aside_base = _filesystem(self.replaced_dir)
+            if aside_device is not None and aside_device != device:
+                self._space.setdefault(aside_device, [aside_base, 0])[1] += aside
 
     def _pass(self) -> None:
         for item in self.items:
@@ -508,10 +576,14 @@ class RestoreEngine:
                 dst = self._dest.for_rel(rel)
                 if dst is None:
                     continue
+                planned, aside = self.stats.bytes_copied, self._aside_bytes
                 if item.kind == "loose":
                     self._restore_loose(src, dst)
                 else:
                     self._restore_root(src, dst)
+                if self.dry:
+                    self._charge(dst, self.stats.bytes_copied - planned,
+                                 self._aside_bytes - aside)
 
     def _restore_loose(self, src: str, dst: str) -> None:
         """Only the visible files directly inside the folder (not its subfolders)."""
@@ -562,6 +634,13 @@ class RestoreEngine:
             self._restore_file(src, dst, st)
         elif stat.S_ISLNK(st.st_mode):
             self._restore_link(src, dst, st)
+
+    def _snap_parent(self, dpath: str) -> bool:
+        """~/snap, ~/snap/<x> or ~/snap/<x>/current: the dry pass walks into it (instead of
+        only counting) so _snap_current can warn."""
+        if self.target != TARGET_ORIGINAL:
+            return False
+        return bool(re.match(r"^snap(/[^/]+(/current)?)?$", paths.home_relative(dpath) or ""))
 
     def _snap_current(self, dpath: str) -> bool:
         """``dpath`` is ~/snap/<x>/current, which does not exist: snapd creates it as a
@@ -650,7 +729,7 @@ class RestoreEngine:
                 self.progress.current = entry.path
                 self._emit()
             if stat.S_ISDIR(est.st_mode):
-                if self.dry and d_st is None:
+                if self.dry and d_st is None and not self._snap_parent(child_dst):
                     # Nothing exists below a folder that is about to be created: count only.
                     self._count_new_tree(entry.path)
                     continue
@@ -691,14 +770,19 @@ class RestoreEngine:
             except OSError as exc:
                 self._issue(folder, "Não foi possível ler a cópia: " + fileops.describe_error(exc), "error")
 
-    def _decide(self, est: os.stat_result, d_st: Optional[os.stat_result]) -> str:
+    def _decide(self, spath: str, dpath: str, est: os.stat_result,
+                d_st: Optional[os.stat_result]) -> str:
         """'new', 'identical', 'keep' or 'replace'."""
         if d_st is None:
             return "new"
         if (stat.S_ISREG(d_st.st_mode) and stat.S_ISREG(est.st_mode)
-                and d_st.st_size == est.st_size
-                and abs(d_st.st_mtime_ns - est.st_mtime_ns) < self.tolerance_ns):
-            return "identical"
+                and d_st.st_size == est.st_size):
+            gap = abs(d_st.st_mtime_ns - est.st_mtime_ns)
+            # The same date is the same file. Close dates (a disk that keeps coarser dates)
+            # count only when the contents match too: two saves a second apart are two
+            # versions, and the older one must be restorable.
+            if gap == 0 or (gap < self.tolerance_ns and self._same_content(spath, dpath)):
+                return "identical"
         if stat.S_ISDIR(d_st.st_mode):
             return "keep" if self.conflict == CONFLICT_SKIP else "replace"
         if self.conflict == CONFLICT_SKIP:
@@ -707,9 +791,22 @@ class RestoreEngine:
             return "keep"
         return "replace"
 
+    def _same_content(self, spath: str, dpath: str) -> bool:
+        try:
+            with open(spath, "rb") as a, open(dpath, "rb") as b:
+                while True:
+                    self._check_cancel()
+                    chunk = a.read(1 << 20)
+                    if chunk != b.read(1 << 20):
+                        return False
+                    if not chunk:
+                        return True
+        except OSError:
+            return False
+
     def _restore_file(self, spath: str, dpath: str, est: os.stat_result) -> None:
         d_st = _lstat(dpath)
-        decision = self._decide(est, d_st)
+        decision = self._decide(spath, dpath, est, d_st)
         if decision == "identical":
             self.stats.identical_files += 1
             return
@@ -721,6 +818,7 @@ class RestoreEngine:
                 self.stats.restored_files += 1
             else:
                 self.stats.replaced_files += 1
+                self._aside_bytes += d_st.st_size if d_st is not None else 0
             self.stats.bytes_copied += est.st_size
             return
         self.progress.current = spath
@@ -793,8 +891,6 @@ class RestoreEngine:
         here = self.here_desktop
         if here is None:
             here = desktop.current_desktop(processes=system.running_process_names())
-        pairs = desktop.path_pairs(self.old_home, paths.home(), old_xdg_dirs(self.meta),
-                                   paths.xdg_user_dirs(existing_only=False))
         # The metadata describes the latest backup: an older export (from «Versões
         # anteriores») may come from another desktop, so there only the file itself counts.
         latest = os.path.basename(os.path.normpath(self.tree_root)) == CURRENT_DIR
@@ -809,7 +905,8 @@ class RestoreEngine:
                 except OSError as exc:
                     self._issue(source, "Não foi possível ler: " + fileops.describe_error(exc), "error")
                     continue
-                plan = desktop.DesktopPlan(text, source_desktop, here, paths.home(), pairs)
+                plan = desktop.DesktopPlan(text, source_desktop, here, paths.home(),
+                                           self._desktop_pairs(text))
                 if not plan.text.strip():
                     self.notes.extend(plan.notes())
                     continue
@@ -848,6 +945,24 @@ class RestoreEngine:
                 else:
                     self.notes.append("Termina a sessão e volta a entrar para ver tudo como "
                                       "estava.")
+
+    def _desktop_pairs(self, text: str) -> List[Tuple[str, str]]:
+        """(old, new) path prefixes for the settings: the same folders the files move to.
+        An export that records its own home and XDG folders (an old one, restored from
+        «Versões anteriores») uses those instead of the latest metadata."""
+        old_home, old_xdg = desktop.home_in_header(text)
+        if old_home and old_home != self.old_home:
+            meta = dict(self.meta, pasta_pessoal=old_home, pastas_xdg=old_xdg)
+            dest = Destinations(TARGET_ORIGINAL, "", meta, {}, self.items)
+            dest.keep_apart(self.tree_root, self.meta)
+            pairs = dest.moved_folders(old_home)
+        else:
+            old_home = self.old_home
+            pairs = list(self._link_pairs)
+        home = paths.home()
+        if old_home and old_home != home:
+            pairs.append((old_home, home))
+        return sorted(pairs, key=lambda p: len(p[0]), reverse=True)
 
     def _after_restore_notes(self) -> None:
         """Things the user should know or do after restoring on this computer."""
@@ -922,6 +1037,44 @@ def _entry_message(exc: BaseException) -> str:
     if isinstance(exc, OSError):
         return fileops.describe_error(exc)
     return str(exc)
+
+
+def _filesystem(path: str) -> Tuple[Optional[int], str]:
+    """(device, nearest existing folder) of the file system ``path`` is or will be on."""
+    probe = path
+    while True:
+        try:
+            return os.stat(probe).st_dev, probe
+        except OSError:
+            parent = os.path.dirname(probe)
+            if not parent or parent == probe:
+                return None, path
+            probe = parent
+
+
+def _current_of(tree_root: str) -> str:
+    """«Cópia atual» of the computer a tree belongs to ("" when it cannot be told)."""
+    tree = os.path.normpath(tree_root)
+    if os.path.basename(tree) == CURRENT_DIR:
+        return tree
+    parent = os.path.dirname(tree)
+    if os.path.basename(parent) == VERSIONS_DIR:
+        return os.path.join(os.path.dirname(parent), CURRENT_DIR)
+    return ""
+
+
+def _copies_root(tree_root: str) -> str:
+    """The Salvaguarda folder of the disk that holds ``tree_root`` (the folder with
+    disco.json), or ``tree_root`` itself when there is none."""
+    real = os.path.realpath(tree_root)
+    folder = real
+    while True:
+        if os.path.isfile(os.path.join(folder, DISK_MARKER)):
+            return folder
+        parent = os.path.dirname(folder)
+        if parent == folder:
+            return real
+        folder = parent
 
 
 def _lstat(path: str) -> Optional[os.stat_result]:

@@ -1,3 +1,4 @@
+import contextlib
 import datetime as _dt
 import os
 import stat
@@ -5,7 +6,7 @@ import threading
 import unittest
 from unittest import mock
 
-from salvaguarda.core import fileops, fsinfo, selection
+from salvaguarda.core import controller, fileops, fsinfo, selection
 from salvaguarda.core.config import KIND_FOLDER, KIND_PRESET, KIND_PROJECT, KIND_XDG
 from salvaguarda.core.engine import (STATUS_CANCELLED, STATUS_FAILED, STATUS_NOTHING, STATUS_OK,
                                      STATUS_WARNINGS, Callbacks)
@@ -200,6 +201,17 @@ class SafetyTests(SandboxTestCase):
         self.assertEqual(self.find_in_versions("Projetos/app/main.py"), [])
         self.assertTrue(any("Não encontrado" in i.message for i in result.issues))
 
+    def test_missing_xdg_folder_keeps_its_copy(self):
+        self.write("Documentos/a.txt", "a", mtime=T0)
+        controller.freeze_choices(self.config)  # as the app does before each copy
+        self.backup()
+        os.rename(os.path.join(self.home, "Documentos"), os.path.join(self.home, "Documentos-antigo"))
+        controller.freeze_choices(self.config)
+        result = self.backup()
+        self.assertTrue(os.path.exists(self.mirror("Documentos/a.txt")))
+        self.assertEqual(self.find_in_versions("Documentos/a.txt"), [])
+        self.assertTrue(any("Não encontrado" in i.message for i in result.issues))
+
     @unittest.skipIf(IS_ROOT, "root reads everything")
     def test_unreadable_folder_keeps_its_copy(self):
         self.write("Documentos/privada/a.txt", "a", mtime=T0)
@@ -385,12 +397,87 @@ class SelectionBehaviourTests(SandboxTestCase):
         self.assertEqual(result.status, STATUS_OK)
         self.assertEqual(result.stats.new_files, 3)  # a.txt, c.ini and user-dirs.dirs
 
+    def test_selected_disk_mounted_inside_a_selected_folder_is_copied(self):
+        # «Documentos» and a disk mounted at «Documentos/Disco»: «Documentos» stops at the
+        # other disk, so the disk is copied as its own item and not dropped as nested.
+        docs = os.path.join(self.home, "Documentos")
+        disk = os.path.join(docs, "Disco")
+        self.write("Documentos/a.txt", "a", mtime=T0)
+        self.write("Documentos/Disco/fotos.txt", "f", mtime=T0)
+        self.config.add_path(KIND_FOLDER, disk)
+        real_stat = os.stat
+        extra = ("st_atime", "st_mtime", "st_ctime", "st_atime_ns", "st_mtime_ns",
+                 "st_ctime_ns", "st_blksize", "st_blocks", "st_rdev")
+
+        def fake_stat(path, *args, **kwargs):
+            st = real_stat(path, *args, **kwargs)
+            if isinstance(path, str) and os.path.normpath(path) == docs:
+                fields = list(st[:10])
+                fields[2] = st.st_dev + 1  # «Documentos» is on another disk than «Disco»
+                return os.stat_result(fields, {k: getattr(st, k) for k in extra})
+            return st
+
+        with mock.patch("os.stat", side_effect=fake_stat):
+            res = selection.resolve(self.config)
+            self.assertIn(disk, [s.path for s in res.sources])
+            self.assertNotIn(disk, [s.path for s in res.nested])
+            result = self.backup()
+        self.assertEqual(result.status, STATUS_OK, result.message)
+        self.assertEqual(read(self.mirror("Documentos/Disco/fotos.txt")), "f")
+        self.assertEqual(read(self.mirror("Documentos/a.txt")), "a")
+        self.assertFalse([n for n in result.notes if "outro disco" in n])
+
     def test_single_file_source(self):
         path = self.write("notas/importante.md", "# nota", mtime=T0)
         self.config.add_path(KIND_FOLDER, path)
         result = self.backup()
         self.assertEqual(result.status, STATUS_OK)
         self.assertEqual(read(self.mirror("notas/importante.md")), "# nota")
+
+
+class CaseInsensitiveDiskTests(SandboxTestCase):
+    """exFAT and FAT32 disks (allowed after a warning) do not tell RELATORIO from relatorio."""
+
+    def _case_insensitive_disk(self):
+        real_rename, real_replace, real_lexists = os.rename, os.replace, os.path.lexists
+        disk = self.disk + os.sep
+
+        def resolve(path):
+            if not isinstance(path, str) or not path.startswith(disk) or real_lexists(path):
+                return path
+            parent, name = os.path.split(path)
+            try:
+                names = os.listdir(parent)
+            except OSError:
+                return path
+            for other in names:
+                if other.casefold() == name.casefold():
+                    return os.path.join(parent, other)
+            return path
+
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch(
+            "os.rename", lambda s, d, *a, **k: real_rename(s, resolve(d), *a, **k)))
+        stack.enter_context(mock.patch(
+            "os.replace", lambda s, d, *a, **k: real_replace(s, resolve(d), *a, **k)))
+        stack.enter_context(mock.patch("os.path.lexists", lambda p: real_lexists(resolve(p))))
+        return stack
+
+    def test_names_that_differ_only_in_case_do_not_overwrite_each_other(self):
+        contents = {"RELATORIO.txt": "maiúsculas", "relatorio.txt": "minúsculas"}
+        for name, text in contents.items():
+            self.write("Documentos/" + name, text, mtime=T0)
+        folder = self.mirror("Documentos")
+        for _run in range(2):
+            with self._case_insensitive_disk():
+                result = self.backup()
+            self.assertEqual(result.status, STATUS_WARNINGS, result.message)
+            names = [n for n in os.listdir(folder) if not n.startswith(".sgtmp-")]
+            self.assertEqual(len(names), 1, names)
+            self.assertEqual(read(os.path.join(folder, names[0])), contents[names[0]])
+            other = next(n for n in contents if n != names[0])
+            self.assertTrue(any(i.path.endswith("/" + other) and i.level == "error"
+                                for i in result.issues), result.issues)
 
 
 class SymlinkedSourceTests(SandboxTestCase):
@@ -422,6 +509,22 @@ class SymlinkedSourceTests(SandboxTestCase):
         self.assertFalse(os.path.islink(self.mirror(".config/mise")))
         self.assertEqual(read(self.mirror(".config/mise/config.toml")), "[tools]")
         self.assertEqual(self.backup().status, STATUS_NOTHING)
+
+    def test_stow_link_to_a_selected_file(self):
+        self.write("dotfiles/git/.gitconfig", "[user]\n\tname = Ana\n", mtime=T0)
+        os.symlink(os.path.join(self.home, "dotfiles", "git", ".gitconfig"),
+                   os.path.join(self.home, ".gitconfig"))
+        self.config.set_enabled(KIND_PRESET, "git", True)
+        result = self.backup()
+        self.assertEqual(result.status, STATUS_OK, [i.message for i in result.issues])
+        copy = self.mirror(".gitconfig")
+        self.assertFalse(os.path.islink(copy))
+        self.assertEqual(read(copy), "[user]\n\tname = Ana\n")
+        self.assertEqual(self.backup().status, STATUS_NOTHING)
+        self.config.add_path(KIND_FOLDER, self.home)
+        self.assertEqual(self.backup().status, STATUS_OK)
+        self.assertFalse(os.path.islink(copy))
+        self.assertEqual(read(copy), "[user]\n\tname = Ana\n")
 
     def test_documents_on_another_partition_with_the_whole_home(self):
         data = os.path.join(self.tmp, "dados", "Documentos")
@@ -491,6 +594,63 @@ class SymlinkedSourceTests(SandboxTestCase):
         result = self.backup()
         self.assertIn(result.status, (STATUS_OK, STATUS_WARNINGS, STATUS_NOTHING))
         self.assertTrue(os.path.islink(current))
+        # What the link points to stays too: the kept profile is still in «Cópia atual».
+        self.assertEqual(read(os.path.join(current, ".config/libreoffice/registo.xcu")), "r")
+
+    def var_link(self, target: str) -> None:
+        var = os.path.join(self.home, ".var")
+        if os.path.lexists(var):
+            fileops.force_remove(var)
+        os.symlink(target, var)
+
+    def test_real_folder_replaces_a_link_kept_for_a_missing_item(self):
+        """«Toda a pasta pessoal» + LibreOffice (its Flatpak path is missing, so kept)."""
+        self.config.add_path(KIND_FOLDER, self.home)
+        self.config.set_enabled(KIND_PRESET, "libreoffice", True)
+        self.write("outro/app/org.gimp.GIMP/gimprc", "v1", mtime=T0)
+        self.var_link(os.path.join(self.home, "outro"))
+        self.backup()
+        self.assertTrue(os.path.islink(self.mirror(".var")))
+        self.var_link("/nao/existe")
+        fileops.force_remove(os.path.join(self.home, ".var"))
+        self.write(".var/app/org.gimp.GIMP/gimprc", "v2", mtime=T0)
+        result = self.backup()
+        self.assertEqual(result.status, STATUS_OK, [i.message for i in result.issues])
+        self.assertEqual(read(self.mirror(".var/app/org.gimp.GIMP/gimprc")), "v2")
+        self.assertEqual(len(self.find_in_versions(".var")), 1)
+
+    def test_link_replaces_a_folder_when_nothing_needed_is_in_it(self):
+        self.config.add_path(KIND_FOLDER, self.home)
+        self.config.set_enabled(KIND_PRESET, "libreoffice", True)
+        self.write(".var/app/org.gimp.GIMP/gimprc", "v1", mtime=T0)
+        self.backup()
+        os.rename(os.path.join(self.home, ".var"), os.path.join(self.home, "outro"))
+        self.var_link(os.path.join(self.home, "outro"))
+        result = self.backup()
+        self.assertEqual(result.status, STATUS_OK, [i.message for i in result.issues])
+        self.assertTrue(os.path.islink(self.mirror(".var")))
+        self.assertEqual(self.backup().status, STATUS_NOTHING)
+
+    def test_what_nobody_copies_below_a_new_link_leaves_the_copy(self):
+        """~/.var moved to another disk and linked; Firefox (Flatpak) is still selected."""
+        self.config.add_path(KIND_FOLDER, self.home)
+        self.config.set_enabled(KIND_PRESET, "firefox", True)
+        self.write(".var/app/org.gimp.GIMP/gimprc", "g", mtime=T0)
+        self.write(".var/app/org.mozilla.firefox/.mozilla/profiles.ini", "p1", mtime=T0)
+        self.backup()
+        moved = os.path.join(self.tmp, "dados", "var")
+        os.makedirs(os.path.dirname(moved))
+        os.rename(os.path.join(self.home, ".var"), moved)
+        os.remove(os.path.join(moved, "app/org.gimp.GIMP/gimprc"))  # deleted afterwards
+        self.var_link(moved)
+        self.write(".var/app/org.mozilla.firefox/.mozilla/profiles.ini", "p2", mtime=T0 + 5)
+        result = self.backup()
+        self.assertEqual(result.status, STATUS_OK, [i.message for i in result.issues])
+        self.assertFalse(os.path.exists(self.mirror(".var/app/org.gimp.GIMP/gimprc")))
+        self.assertEqual(len(self.find_in_versions(".var/app/org.gimp.GIMP/gimprc")), 1)
+        self.assertEqual(read(self.mirror(".var/app/org.mozilla.firefox/.mozilla/profiles.ini")),
+                         "p2")
+        self.assertEqual(self.backup().status, STATUS_NOTHING)
 
 
 class ExclusionBehaviourTests(SandboxTestCase):
@@ -595,7 +755,7 @@ class UpgradeSafetyTests(SandboxTestCase):
         self.assertEqual(read(self.mirror("Documentos/novo.txt")), "n")
         self.assertTrue(os.path.exists(self.mirror(".codex/log/codex-tui.log")))
         self.assertEqual(self.find_in_versions(".codex/log/codex-tui.log"), [])
-        self.assertTrue(any("Abre a Salvaguarda" in n for n in result.notes))
+        self.assertTrue(any("a partir da janela" in n for n in result.notes))
         self.assertEqual(self.layout.read_meta()["versao_app"], "1.0.0")
         with mock.patch("sys.stdout"):
             again = self.backup(_TerminalCallbacks(False), meta_extra={"versao_app": "1.1.0"})
@@ -607,6 +767,29 @@ class UpgradeSafetyTests(SandboxTestCase):
         self.assertIn("1 item deixa de ser copiado", cb.questions[0].text)
         self.assertFalse(os.path.exists(self.mirror(".codex/log/codex-tui.log")))
         self.assertEqual(self.layout.read_meta()["versao_app"], "1.1.0")
+
+    def test_unattended_run_with_an_open_app_copies_everything_else(self):
+        from salvaguarda.cli import _TerminalCallbacks
+
+        self.config.set_enabled(KIND_PRESET, "firefox", True)
+        self.write(".mozilla/firefox/profiles.ini", "p1", mtime=T0)
+        self.write("Documentos/a.txt", "a", mtime=T0)
+        self.backup()
+        self.write(".mozilla/firefox/profiles.ini", "p2", mtime=T0 + 5)
+        self.write("Documentos/novo.txt", "n", mtime=T0)
+        with mock.patch("sys.stdout"):
+            result = self.backup(_TerminalCallbacks(False), warn_open_apps=True,
+                                 running_processes=lambda: {"firefox"})
+        self.assertEqual(result.status, STATUS_OK, result.message)
+        self.assertEqual(read(self.mirror("Documentos/novo.txt")), "n")
+        self.assertEqual(read(self.mirror(".mozilla/firefox/profiles.ini")), "p1")
+        self.assertEqual(self.find_in_versions(".mozilla/firefox/profiles.ini"), [])
+        self.assertTrue(any("Firefox" in n and "abertas" in n for n in result.notes))
+        # In the window, the question is still asked and «Cancelar» still cancels.
+        cb = RecordingCallbacks()
+        result = self.backup(cb, warn_open_apps=True, running_processes=lambda: {"firefox"})
+        self.assertEqual([q.kind for q in cb.questions], ["open_apps"])
+        self.assertEqual(result.status, STATUS_CANCELLED)
 
     def test_same_version_with_new_exclusion_does_not_ask(self):
         self.write("Projetos/app/node_modules/x.js", "x", mtime=T0)
@@ -688,7 +871,10 @@ class DconfExtraTests(SandboxTestCase):
             engine = controller.build_engine(self.config, self.root, RecordingCallbacks(),
                                              threading.Event())
             engine.dconf_dump("/nao/existe")
-        self.assertEqual(written, [desktop.dump_header(desktop.CINNAMON)])
+        self.assertEqual(len(written), 1)
+        self.assertTrue(written[0].startswith(desktop.dump_header(desktop.CINNAMON)))
+        self.assertEqual(desktop.home_in_header(written[0])[0], self.home)
+        self.assertEqual(desktop.home_in_header(written[0])[1]["DOCUMENTS"], "~/Documentos")
 
 
 if __name__ == "__main__":

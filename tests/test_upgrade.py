@@ -118,6 +118,25 @@ class ConfigEvolutionTests(SandboxTestCase):
         self.assertEqual(saved["settings"]["keep_versions_days"], 90)
         self.assertEqual(saved["version"], cfgmod.CONFIG_VERSION + 1)
 
+    def test_record_fields_from_a_newer_version_survive_a_save(self):
+        data = json.loads(json.dumps(self.BASE))
+        data["sources"][0]["exclusoes"] = ["*.iso"]
+        data["destinations"][0]["cifrado"] = True
+        data["version"] = cfgmod.CONFIG_VERSION + 1
+        self.write_config(data)
+        config = cfgmod.load()
+        config.set_enabled("xdg", "MUSIC", True)
+        cfgmod.save(config)
+        saved = self.read_config()
+        self.assertEqual(saved["sources"][0]["exclusoes"], ["*.iso"])
+        self.assertEqual(saved["sources"][0]["key"], "DOCUMENTS")
+        self.assertNotIn("exclusoes", saved["sources"][1])
+        self.assertIs(saved["destinations"][0]["cifrado"], True)
+        self.assertEqual(saved["destinations"][0]["path"], "/media/x/Salvaguarda")
+        # The disk snapshot and the copy made by the dialogs keep them too.
+        again = cfgmod.Config.from_dict(config.to_dict())
+        self.assertEqual(again.snapshot()["sources"][0]["exclusoes"], ["*.iso"])
+
     def test_unexpected_types_never_lose_the_whole_config(self):
         variants = {
             "version as text": {"version": "2.0"},

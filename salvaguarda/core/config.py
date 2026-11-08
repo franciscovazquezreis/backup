@@ -119,6 +119,9 @@ class Config:
         """Known fields plus any keys a newer version wrote (kept untouched)."""
         data: Dict[str, Any] = dict(getattr(self, "_unknown", {}))
         data.update(asdict(self))
+        for name in ("sources", "destinations"):
+            data[name] = [_with_unknown(record, raw)
+                          for record, raw in zip(getattr(self, name), data[name])]
         settings = dict(getattr(self, "_unknown_settings", {}))
         settings.update(data["settings"])
         data["settings"] = settings
@@ -137,10 +140,8 @@ class Config:
         data = migrate(data if isinstance(data, dict) else {})
         settings_raw = data.get("settings") if isinstance(data.get("settings"), dict) else {}
         settings = Settings(**_clean(Settings, settings_raw))
-        sources = [SourceEntry(**v) for v in (_clean(SourceEntry, r) for r in _as_list(data.get("sources")))
-                   if "kind" in v and "key" in v]
-        destinations = [Destination(**v) for v in (_clean(Destination, r) for r in _as_list(data.get("destinations")))
-                        if "id" in v and "name" in v and "path" in v]
+        sources = _records(SourceEntry, data.get("sources"), ("kind", "key"))
+        destinations = _records(Destination, data.get("destinations"), ("id", "name", "path"))
         top = _clean(cls, data)
         config = cls(
             computer_name=top.get("computer_name", ""),
@@ -253,6 +254,26 @@ def migrate(data: Dict[str, Any]) -> Dict[str, Any]:
 
 def _as_list(raw: Any) -> List[Any]:
     return raw if isinstance(raw, list) else []
+
+
+def _records(klass, raw: Any, required) -> List[Any]:
+    """Valid records of ``klass``; fields a newer version added are kept for ``to_dict``."""
+    known = {f.name for f in fields(klass)}
+    out = []
+    for item in _as_list(raw):
+        values = _clean(klass, item)
+        if not all(name in values for name in required):
+            continue
+        record = klass(**values)
+        record._unknown = {k: v for k, v in item.items() if k not in known}
+        out.append(record)
+    return out
+
+
+def _with_unknown(record: Any, values: Dict[str, Any]) -> Dict[str, Any]:
+    data = dict(getattr(record, "_unknown", {}))
+    data.update(values)
+    return data
 
 
 def _clean(klass, raw: Any) -> Dict[str, Any]:

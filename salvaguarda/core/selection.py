@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -76,16 +77,21 @@ def build_candidates(config: Config, scan: Optional[catalog.HomeScan] = None) ->
     seen: Set[Tuple[str, str]] = set()
     user_home = paths.home()
 
-    xdg = paths.xdg_user_dirs()
+    # Missing folders too: one already chosen (renamed, on a disk that is not mounted)
+    # must keep its copy instead of leaving the mirror as if it were switched off.
+    xdg = paths.xdg_user_dirs(existing_only=False)
     for key in paths.XDG_KEYS:
         if key not in xdg:
             continue
         entry = config.find(KIND_XDG, key)
         folder = xdg[key]
+        exists = os.path.isdir(folder)
+        if not exists and entry is None:
+            continue
         result.append(Candidate(
             KIND_XDG, key, SECTION_PERSONAL, os.path.basename(folder) or catalog.XDG_LABELS[key],
             paths.display_path(folder), catalog.XDG_ICONS[key], [folder],
-            entry.enabled if entry else True,
+            entry.enabled if entry else True, exists=exists,
         ))
         seen.add((KIND_XDG, key))
 
@@ -263,7 +269,7 @@ def resolve(config: Config, candidates: Optional[List[Candidate]] = None) -> Res
                 continue
             if paths.is_inside(src.path, other.path) and (
                     src.path != other.path or full_roots.index(other) < full_roots.index(src)) \
-                    and not _through_link(src.path, other.path):
+                    and not _not_reached(src.path, other.path):
                 container = other
                 break
         if container is not None:
@@ -278,19 +284,31 @@ def resolve(config: Config, candidates: Optional[List[Candidate]] = None) -> Res
     return res
 
 
-def _through_link(path: str, container: str) -> bool:
-    """Whether a symbolic link sits between ``container`` and ``path`` (``path`` included).
+def _not_reached(path: str, container: str) -> bool:
+    """Whether a symbolic link or another disk sits between ``container`` and ``path``
+    (``path`` included).
 
-    The container copies such a link as a link, so what it points to (another folder,
-    another disk, a "stow" dotfiles folder) is only copied by ``path`` as its own root.
+    The container copies such a link as a link and skips folders of another disk or
+    partition (one mounted inside it), so what lies beyond them (another folder, another
+    disk, a "stow" dotfiles folder) is only copied by ``path`` as its own root.
     """
     rel = os.path.relpath(path, container)
     if rel in (".", "") or rel.startswith(".."):
         return False
+    try:
+        root_dev = os.stat(container).st_dev  # BackupEngine follows a root that is a link
+    except OSError:
+        root_dev = None
     current = container
     for part in rel.split(os.sep):
         current = os.path.join(current, part)
-        if os.path.islink(current):
+        try:
+            st = os.lstat(current)
+        except OSError:
+            continue
+        if stat.S_ISLNK(st.st_mode):
+            return True
+        if root_dev is not None and stat.S_ISDIR(st.st_mode) and st.st_dev != root_dev:
             return True
     return False
 

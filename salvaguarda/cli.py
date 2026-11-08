@@ -50,8 +50,8 @@ class _TerminalCallbacks(Callbacks):
             print("  - " + item)
         if not self.interactive:
             if question.unattended:
-                print("(sem terminal interativo: a cópia continua e estes itens ficam na "
-                      "«Cópia atual» até decidires na janela da Salvaguarda)")
+                if question.unattended_text:
+                    print("({})".format(question.unattended_text))
                 return question.unattended
             print("(sem terminal interativo: a opção segura foi escolhida)")
             return question.options[0][0]

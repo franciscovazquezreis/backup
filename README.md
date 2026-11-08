@@ -195,7 +195,9 @@ discos montados dentro das pastas escolhidas (adiciona-os como pasta própria se
 `salvaguarda --copiar` faz a cópia sem abrir a janela, para o primeiro disco de cópias ligado.
 No Cinnamon, cria um atalho personalizado em Definições do sistema, Teclado, Atalhos, com o
 comando `salvaguarda --copiar`. Sem terminal ninguém responde às perguntas: nesse caso a cópia
-escolhe sempre o lado seguro (não retira nada da «Cópia atual») e deixa a decisão para a janela.
+escolhe sempre o lado seguro e continua. Não retira nada da «Cópia atual» sem confirmação numa
+cópia feita na janela, e se o navegador ou o e-mail estiverem abertos copia tudo o resto e deixa
+a cópia dessas apps como estava.
 
 ## Limitações conhecidas
 

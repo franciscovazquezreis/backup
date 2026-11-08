@@ -133,6 +133,23 @@ def time_granularity_ns(folder: str) -> int:
     return 2_000_000_000
 
 
+def ignores_case(folder: str) -> bool:
+    """Whether the file system at ``folder`` takes «Foto.jpg» and «foto.jpg» as the same
+    name (FAT32 and exFAT do)."""
+    try:
+        fd, tmp = tempfile.mkstemp(prefix=".sgtmp-probe-", dir=folder)
+    except OSError:
+        return False
+    try:
+        os.close(fd)
+        return os.path.lexists(os.path.join(folder, os.path.basename(tmp).upper()))
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
 def can_write(folder: str) -> bool:
     return os.access(folder, os.W_OK | os.X_OK)
 

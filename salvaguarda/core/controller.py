@@ -110,8 +110,10 @@ def build_engine(config: Config, root: str, callbacks: Callbacks,
         prune_when_full=config.settings.prune_when_full,
         warn_open_apps=config.settings.warn_open_apps,
         running_processes=system.running_process_names,
-        dconf_dump=lambda target: system.dconf_dump(
-            target, desktop.dump_header(str(meta_extra.get("ambiente") or ""))),
+        dconf_dump=lambda target: system.dconf_dump(target, desktop.dump_header(
+            str(meta_extra.get("ambiente") or ""), str(meta_extra.get("pasta_pessoal") or ""),
+            meta_extra.get("pastas_xdg") if isinstance(meta_extra.get("pastas_xdg"), dict)
+            else None)),
         inventory_dump=inventory_dump,
         meta_extra=meta_extra,
         callbacks=callbacks,

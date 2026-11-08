@@ -208,6 +208,10 @@ class RepositoryStateTest(FinderTestCase):
         result = projects.ScanResult(projects=[found])
         self.assertEqual(controller.projects_at_risk(self.config, result), [found])
         self.assertEqual(controller.projects_only_here(self.config, result), [])
+        # Without git the counts are unknown: the worktree is not called safe either.
+        unknown = self.by_rel(self.find(git=None))["~/Projetos/app-wt"]
+        self.assertTrue(projects.history_elsewhere(unknown))
+        self.assertFalse(projects.in_backup(unknown))
         # Once pushed, the copy of the files is all that is missing: nothing to warn about.
         self.git(main, "update-ref", "refs/remotes/origin/feature", "feature")
         found = self.by_rel(self.find())["~/Projetos/app-wt"]

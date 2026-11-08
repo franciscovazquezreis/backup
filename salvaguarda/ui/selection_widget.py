@@ -325,16 +325,18 @@ class SelectionWidget(Gtk.Box):
         suffix = None
         if actions:
             buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-            target = project.commits_elsewhere if projects.history_elsewhere(project) \
-                else project.path
+            elsewhere = projects.history_elsewhere(project)
+            target = project.commits_elsewhere if elsewhere else project.path
             storable = paths.safe_text(target) == target
-            if not storable:
-                lines.append("O nome desta pasta tem caracteres que as definições não "
-                             "conseguem guardar. Muda-lhe o nome para a poderes copiar.")
-            elif project.blocked:
+            if project.blocked:
                 lines.append("Está numa pasta temporária que o sistema apaga. Move o projeto "
                              "para a pasta pessoal.")
-            elif projects.history_elsewhere(project):
+            elif elsewhere and not storable:
+                lines.append("A pasta vai para a cópia, mas os commits estão no repositório "
+                             "principal ({}), cujo nome tem caracteres que as definições não "
+                             "conseguem guardar. Muda-lhe o nome para o poderes copiar.".format(
+                                 paths.safe_text(paths.display_path(target))))
+            elif elsewhere:
                 lines.append("A pasta vai para a cópia, mas os commits estão no repositório "
                              "principal, que não vai.")
                 add = Gtk.Button.new_with_label("Adicionar o repositório principal")
@@ -344,6 +346,9 @@ class SelectionWidget(Gtk.Box):
             elif project.excluded_by:
                 lines.append("Está numa pasta copiada, mas a exclusão «{}» deixa-o de fora. "
                              "Podes mudar as exclusões nas Definições.".format(project.excluded_by))
+            elif not storable:
+                lines.append("O nome desta pasta tem caracteres que as definições não "
+                             "conseguem guardar. Muda-lhe o nome para a poderes copiar.")
             else:
                 text = "Adicionar o projeto todo" if project.partial else "Adicionar"
                 if project.partial:
@@ -451,6 +456,12 @@ class SelectionWidget(Gtk.Box):
 
     def _add(self, kind: str, path: Optional[str]) -> None:
         if not path:
+            return
+        if paths.safe_text(path) != path:
+            common.message(self._window(), "Não é possível adicionar",
+                           "O nome desta pasta tem caracteres que as definições não conseguem "
+                           "guardar. Muda-lhe o nome e volta a adicioná-la.",
+                           Gtk.MessageType.WARNING)
             return
         error = self._validate(path)
         if error:

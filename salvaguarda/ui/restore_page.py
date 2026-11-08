@@ -266,10 +266,14 @@ class RestorePage(Gtk.Stack):
         found = restore.items_for_tree(tree, self.meta)
         self.inventory_paths = [os.path.join(tree, rel) for item in found if item.is_inventory
                                 for rel in item.exports if os.path.isfile(os.path.join(tree, rel))]
-        self.items = [item for item in found if not item.is_inventory]
         original = self.to_original.get_active()
+        # Desktop settings are only applied to the original places: in another folder an
+        # item that holds only them would restore nothing.
+        self.items = [item for item in found if not item.is_inventory
+                      and (original or item.rels or not item.is_settings_export)]
         self.variant_plan = restore.plan_variants(self.items, tree_root=tree) if original else {}
-        self.snap_plan = restore.snap_warnings(self.items, self.variant_plan) if original else {}
+        self.snap_plan = restore.snap_warnings(self.items, self.variant_plan,
+                                               tree_root=tree) if original else {}
         self.checks = {}
         if self.inventory_paths:
             inventory = Gtk.Button.new_with_mnemonic("Ver a _lista de programas que estavam instalados")
@@ -479,17 +483,27 @@ class RestorePage(Gtk.Stack):
                 return
         remaps = {}
         if target == restore.TARGET_ORIGINAL:
-            selected_rels = {rel for item in items for rel in item.rels}
-            remaps = {rel: r for rel, r in self.variant_plan.items() if rel in selected_rels}
+            # Decided with the items really chosen: an unticked item no longer changes
+            # where the others go.
+            tree = self._tree()
+            remaps = restore.plan_variants(items, tree_root=tree)
             warnings = [w for r in remaps.values() for w in r.warnings]
-            warnings += [w for rel, w in self.snap_plan.items()
-                         if rel in selected_rels and w not in warnings]
             if warnings:
                 answer = common.choose(
                     self.window, "Alguns perfis não vão para a app instalada",
                     "Vão para o sítio de onde vieram. Se preferires, cancela, faz o que está "
                     "indicado e volta a restaurar.",
                     [("cancel", "Cancelar"), ("continue", "Continuar")], details=warnings,
+                    kind=Gtk.MessageType.WARNING)
+                if answer != "continue":
+                    return
+            snaps = sorted(set(restore.snap_warnings(items, remaps, tree_root=tree).values()))
+            if snaps:
+                answer = common.choose(
+                    self.window, "Alguns perfis não vão ser restaurados",
+                    "Ficam de fora deste restauro. Faz o que está indicado e volta a "
+                    "restaurar, ou continua sem eles.",
+                    [("cancel", "Cancelar"), ("continue", "Continuar sem eles")], details=snaps,
                     kind=Gtk.MessageType.WARNING)
                 if answer != "continue":
                     return

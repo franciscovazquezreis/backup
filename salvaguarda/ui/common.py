@@ -11,7 +11,7 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
 from .. import APP_ID  # noqa: E402
-from ..core import system  # noqa: E402
+from ..core import paths, system  # noqa: E402
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 
@@ -72,7 +72,8 @@ def label(text: str = "", classes: Sequence[str] = (), *, wrap: bool = False,
     if markup:
         widget.set_markup(text)
     else:
-        widget.set_text(text)
+        # A folder name that is not valid UTF-8 would make GTK raise: show it readable.
+        widget.set_text(paths.safe_text(text))
     widget.set_xalign(xalign)
     widget.set_justify(justify)
     if wrap:

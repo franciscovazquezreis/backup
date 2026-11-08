@@ -210,6 +210,14 @@ class DesktopTests(TmpCase):
                                  self.root)
         self.assertTrue(any("Não foi possível confirmar" in n for n in unknown.notes()))
 
+    def test_header_without_a_desktop_does_not_hide_the_metadata(self):
+        """A backup outside a session (no desktop known) must not override the metadata."""
+        text = ds.dump_header("", "/home/ana", {"PICTURES": "~/Imagens"}) + CINNAMON_DUMP
+        self.assertIsNone(ds.desktop_in_header(text))
+        self.assertEqual(ds.export_source(text, ds.GNOME), ds.GNOME)
+        self.assertEqual(ds.home_in_header(text), ("/home/ana", {"PICTURES": "~/Imagens"}))
+        self.assertEqual(ds.home_in_header(CINNAMON_DUMP), ("", {}))
+
     def test_rewrite_respects_boundaries(self):
         text, n = ds.rewrite_paths("a='/home/anabela/x' b='/home/ana'", [("/home/ana", "/home/bruno")])
         self.assertEqual(text, "a='/home/anabela/x' b='/home/bruno'")
@@ -327,14 +335,23 @@ class InventoryTests(TmpCase):
     def test_lm_studio_models_and_readable_problems(self):
         h = self.home
         self.touch(".lmstudio/models/lmstudio-community/Qwen3-8B-GGUF/q4.gguf", "x", base=h)
+        self.touch(".lmstudio/models/bartowski/Llama-3.2-3B-Instruct-GGUF/q4.gguf", "x", base=h)
         self.touch(".bun/install/global/package.json", json.dumps({"dependencies": ["x"]}), base=h)
         with unittest.mock.patch.object(inv, "section_docker", side_effect=RuntimeError("avaria")):
             sections = inv.build(h, {}, FakeRunner({}))
         text = inv.render(sections, "portatil", "Ubuntu", "GNOME", "ana", h, "1.1.0",
                           _dt.datetime(2026, 11, 8, 14, 0))
         self.assertIn("lms get lmstudio-community/Qwen3-8B-GGUF", text)
+        self.assertIn("lms get bartowski/Llama-3.2-3B-Instruct-GGUF", text)
         self.assertIn("Docker: não foi possível ler (avaria)", text)
         self.assertNotIn("<lambda>", text)
+
+    def test_non_utf8_name_does_not_rewrite_the_list_every_time(self):
+        target = os.path.join(self.tmp, "programas.md")
+        text = "# Programas\n" + inv.STAMP_PREFIX + " 08/11\n- " + os.fsdecode(b"Edi\xe7\xe3o") + "\n"
+        self.assertTrue(inv.write_if_changed(target, text))
+        later = text.replace("08/11", "09/11")
+        self.assertFalse(inv.write_if_changed(target, later))
 
     def test_missing_tools_give_an_empty_but_valid_file(self):
         runner = FakeRunner({})

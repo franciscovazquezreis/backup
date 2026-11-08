@@ -11,6 +11,7 @@ time the exported settings are filtered before ``dconf load``:
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -61,19 +62,49 @@ def label(desktop: str) -> str:
 
 # First line of the export written by the backup: which desktop it comes from.
 HEADER_PREFIX = "# salvaguarda-ambiente:"
+HOME_PREFIX = "# salvaguarda-pasta-pessoal:"
+XDG_PREFIX = "# salvaguarda-pastas-xdg:"
 
 
-def dump_header(desktop: str) -> str:
-    return "{} {}\n".format(HEADER_PREFIX, desktop or UNKNOWN)
+def dump_header(desktop: str, home: str = "", xdg: Optional[Dict[str, str]] = None) -> str:
+    """Comment lines (``dconf load`` ignores them) that say where an export comes from, so
+    an old export restored from «Versões anteriores» does not depend on newer metadata."""
+    lines = []
+    if desktop:  # unknown (a run outside a session): say nothing, the metadata decides
+        lines.append("{} {}".format(HEADER_PREFIX, desktop))
+    if home:
+        lines.append("{} {}".format(HOME_PREFIX, home))
+    if xdg:
+        lines.append("{} {}".format(XDG_PREFIX, json.dumps(xdg, ensure_ascii=True,
+                                                           sort_keys=True)))
+    return "".join(line + "\n" for line in lines)
+
+
+def _header_value(text: str, prefix: str) -> Optional[str]:
+    for line in text.splitlines()[:8]:
+        if line.startswith(prefix):
+            return line[len(prefix):].strip()
+    return None
 
 
 def desktop_in_header(text: str) -> Optional[str]:
-    """Desktop recorded in the export itself ("" when unknown), or None without header."""
-    for line in text.splitlines()[:5]:
-        if line.startswith(HEADER_PREFIX):
-            value = line[len(HEADER_PREFIX):].strip()
-            return "" if value == UNKNOWN else value
-    return None
+    """Desktop recorded in the export itself, or None when it does not say."""
+    return _header_value(text, HEADER_PREFIX) or None
+
+
+def home_in_header(text: str) -> Tuple[str, Dict[str, str]]:
+    """(old home folder, old XDG folders as "~/...") recorded in the export, or ("", {})."""
+    home = _header_value(text, HOME_PREFIX) or ""
+    xdg: Dict[str, str] = {}
+    raw = _header_value(text, XDG_PREFIX)
+    if raw:
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            data = None
+        if isinstance(data, dict):
+            xdg = {str(k): v for k, v in data.items() if isinstance(v, str)}
+    return home, xdg
 
 
 def export_source(text: str, recorded: str = "") -> str:

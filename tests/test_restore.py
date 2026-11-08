@@ -5,7 +5,7 @@ import unittest
 
 from salvaguarda.core import restore
 from salvaguarda.core.config import KIND_FOLDER, KIND_PRESET, KIND_PROJECT
-from salvaguarda.core.engine import STATUS_NOTHING, STATUS_OK
+from salvaguarda.core.engine import STATUS_FAILED, STATUS_NOTHING, STATUS_OK
 from salvaguarda.core.layout import list_version_runs
 
 from .helpers import SandboxTestCase, read
@@ -115,6 +115,64 @@ class RestoreTests(SandboxTestCase):
         self.assertEqual(result.status, STATUS_OK)
         self.assertEqual(read(os.path.join(target, "Projetos", "site", ".env")), "TOKEN=1")
 
+    def test_space_is_checked_where_the_files_go(self):
+        """A folder on a data partition is restored there even when the home folder is
+        nearly full, and is refused when the data partition itself has no room."""
+        from unittest import mock
+
+        from salvaguarda.core import fsinfo
+
+        data = os.path.join(self.tmp, "dados", "Fotos")
+        os.makedirs(data)
+        with open(os.path.join(data, "ferias.jpg"), "w") as fh:
+            fh.write("foto")
+        self.config.add_path(KIND_FOLDER, data)
+        self.backup()
+        shutil.rmtree(data)
+        items = [i for i in self.items() if i.kind == KIND_FOLDER]
+        self.assertEqual(len(items), 1)
+
+        def space(home_free, data_free):
+            def usage(path):
+                inside_home = os.path.realpath(path).startswith(os.path.realpath(self.home))
+                return fsinfo.Usage(10 ** 12, home_free if inside_home else data_free)
+            return mock.patch("salvaguarda.core.restore.fsinfo.usage", side_effect=usage)
+
+        with space(home_free=10 ** 6, data_free=10 ** 11):
+            result = restore.RestoreEngine(self.layout.current_dir, items).run()
+        self.assertEqual(result.status, STATUS_OK, result.message)
+        self.assertEqual(read(os.path.join(data, "ferias.jpg")), "foto")
+
+        shutil.rmtree(data)
+        with space(home_free=10 ** 11, data_free=10 ** 6):
+            result = restore.RestoreEngine(self.layout.current_dir, items).run()
+        self.assertEqual(result.status, "failed")
+        self.assertIn("espaço", result.message)
+        self.assertFalse(os.path.exists(data))
+
+    def test_restore_to_a_folder_inside_the_copy_is_refused(self):
+        self.write("Documentos/Atas.txt", "atas", mtime=T0)
+        self.write("Documentos/2026/fatura.pdf", "pdf", mtime=T0)
+        self.backup()
+        self.write("Documentos/Atas.txt", "atas novas", mtime=T0 + 10)
+        self.backup()
+        before = snapshot(self.layout.root)
+        items = [i for i in self.items() if i.label == "Documentos"]
+        link = os.path.join(self.tmp, "atalho")
+        os.symlink(self.mirror("Documentos"), link)
+        run = list_version_runs(self.layout)[0].path
+        old_items = [i for i in self.items(run) if i.label == "Documentos"]
+        for tree, chosen, folder in (
+                (self.layout.current_dir, items, self.mirror("Documentos")),
+                (self.layout.current_dir, items, os.path.join(link, "2026")),
+                # An old version into «Cópia atual» would change the current copy.
+                (run, old_items, self.mirror("Documentos"))):
+            result = restore.RestoreEngine(tree, chosen, target=restore.TARGET_FOLDER,
+                                           folder=folder).run()
+            self.assertEqual(result.status, STATUS_FAILED, folder)
+            self.assertIn("dentro da cópia", result.message)
+        self.assertEqual(snapshot(self.layout.root), before)
+
     def test_conflict_policies(self):
         self.populate()
         self.backup()
@@ -149,6 +207,35 @@ class RestoreTests(SandboxTestCase):
         result = restore.RestoreEngine(self.layout.current_dir, items).run()
         self.assertEqual(result.status, STATUS_NOTHING, result.message)
 
+    def test_version_saved_a_second_earlier_is_restored(self):
+        nota = self.write("Documentos/nota.txt", "versão A", mtime=T0)
+        self.backup()
+        self.write("Documentos/nota.txt", "versão B", mtime=T0 + 1)  # same size
+        self.backup()
+        runs = list_version_runs(self.layout)
+        self.assertEqual(len(runs), 1)
+        docs = [i for i in self.items(runs[0].path) if i.label == "Documentos"]
+        result = restore.RestoreEngine(runs[0].path, docs).run()
+        self.assertEqual(read(nota), "versão A")
+        self.assertEqual(result.stats.replaced_files, 1)
+        self.assertEqual(read(os.path.join(result.replaced_dir, "Documentos", "nota.txt")),
+                         "versão B")
+
+    def test_close_dates_with_the_same_contents_are_left_alone(self):
+        # A restore folder on a disk that keeps coarser dates than the copy disk.
+        self.write("Documentos/nota.txt", "versão A", mtime=T0)
+        self.backup()
+        target = os.path.join(self.tmp, "recuperado")
+        docs = [i for i in self.items() if i.label == "Documentos"]
+        restore.RestoreEngine(self.layout.current_dir, docs,
+                              target=restore.TARGET_FOLDER, folder=target).run()
+        restored = os.path.join(target, "Documentos", "nota.txt")
+        os.utime(restored, ns=(T0 * 10 ** 9 + 600_000_000,) * 2)
+        result = restore.RestoreEngine(self.layout.current_dir, docs,
+                                       target=restore.TARGET_FOLDER, folder=target).run()
+        self.assertEqual(result.status, STATUS_NOTHING, result.message)
+        self.assertEqual(result.stats.identical_files, 1)
+
     def test_recover_deleted_file_from_versions(self):
         self.populate()
         self.backup()
@@ -162,6 +249,27 @@ class RestoreTests(SandboxTestCase):
         result = restore.RestoreEngine(runs[0].path, items, conflict=restore.CONFLICT_SKIP).run()
         self.assertEqual(result.status, STATUS_OK, result.message)
         self.assertEqual(read(os.path.join(self.home, "Documentos", "relatório.odt")), "conteúdo")
+
+    def test_version_lists_what_a_narrower_selection_left_behind(self):
+        # All of .config was copied, then only .config/Code/User: the version holds the
+        # old settings and .config/Code/outro.txt, two levels below the shared folder.
+        self.write(".config/Code/User/settings.json", "antigo", mtime=T0)
+        self.write(".config/Code/outro.txt", "outro", mtime=T0)
+        config_dir = self.config.add_path(KIND_FOLDER, os.path.join(self.home, ".config"))
+        self.backup()
+        self.config.remove(KIND_FOLDER, config_dir.key)
+        self.config.add_path(KIND_FOLDER, os.path.join(self.home, ".config", "Code", "User"))
+        self.write(".config/Code/User/settings.json", "novo", mtime=T0 + 100)
+        self.backup()
+        runs = list_version_runs(self.layout)
+        self.assertEqual(len(runs), 1)
+        os.remove(os.path.join(self.home, ".config", "Code", "outro.txt"))
+        items = self.items(runs[0].path)
+        result = restore.RestoreEngine(runs[0].path, items, conflict=restore.CONFLICT_SKIP).run()
+        self.assertEqual(result.status, STATUS_OK, result.message)
+        self.assertEqual(read(os.path.join(self.home, ".config", "Code", "outro.txt")), "outro")
+        self.assertEqual(read(os.path.join(self.home, ".config", "Code", "User", "settings.json")),
+                         "novo")
 
     def test_desktop_settings_are_applied_with_dconf(self):
         from unittest import mock
@@ -339,6 +447,84 @@ class CrossDistroRestoreTests(SandboxTestCase):
         self.assertTrue(os.path.islink(current))
         self.assertEqual(read(os.path.join(new_home, "snap/libreoffice/x7/.config/libreoffice/"
                                                      "registo.xcu")), "r")
+
+    def test_whole_snap_item_warns_about_a_snap_that_never_ran(self):
+        self.write("snap/libreoffice/x5/.config/libreoffice/registo.xcu", "r", mtime=T0)
+        os.symlink("x5", os.path.join(self.home, "snap", "libreoffice", "current"))
+        self.config.set_enabled(KIND_PRESET, "libreoffice", True)
+        self.config.add_path(KIND_FOLDER, os.path.join(self.home, "snap"))
+        self.backup_with_meta()
+        new_home = self.reinstall()
+        items = [i for i in self.items() if i.kind == KIND_FOLDER]
+        self.assertEqual([i.rels for i in items], [["Pasta pessoal/snap"]])
+        warnings = restore.snap_warnings(items, {}, tree_root=self.layout.current_dir)
+        self.assertTrue(any("LibreOffice" in w for w in warnings.values()), warnings)
+        result = restore.RestoreEngine(self.layout.current_dir, items,
+                                       meta=self.layout.read_meta()).run()
+        self.assertFalse(os.path.lexists(os.path.join(new_home, "snap/libreoffice/current")))
+        self.assertTrue(any("LibreOffice" in i.message for i in result.issues), result.issues)
+
+    def test_version_folder_keeps_xdg_folders_apart_like_the_current_copy(self):
+        self.write("Documentos/notas.txt", "pt-v1", mtime=T0)
+        self.write("Documents/outro.txt", "en", mtime=T0)
+        self.config.add_path(KIND_FOLDER, os.path.join(self.home, "Documents"))
+        self.backup_with_meta()
+        self.write("Documentos/notas.txt", "pt-v2", mtime=T0 + 10)
+        self.backup_with_meta()
+        new_home = self.reinstall(english=True)
+        run = list_version_runs(self.layout)[0].path
+        items = [i for i in self.items(run) if i.xdg_key == "DOCUMENTS"]
+        restore.RestoreEngine(run, items, meta=self.layout.read_meta()).run()
+        self.assertEqual(read(os.path.join(new_home, "Documentos", "notas.txt")), "pt-v1")
+        self.assertFalse(os.path.exists(os.path.join(new_home, "Documents", "notas.txt")))
+
+    def test_settings_paths_follow_the_folders_the_files_went_to(self):
+        from unittest import mock
+
+        self.write("Imagens/fundo.jpg", "jpg", mtime=T0)
+        self.write("Pictures/outra.jpg", "jpg", mtime=T0)
+        self.config.add_path(KIND_FOLDER, os.path.join(self.home, "Pictures"))
+        self.config.set_enabled(KIND_PRESET, "desktop", True)
+        uri = "file://" + os.path.join(self.home, "Imagens", "fundo.jpg")
+
+        def fake_dump(target):
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "w") as fh:
+                fh.write("[org/x/background]\npicture-uri='{}'\n".format(uri))
+
+        with mock.patch("salvaguarda.core.selection._dconf_available", return_value=True):
+            self.backup_with_meta(dconf_dump=fake_dump)
+        new_home = self.reinstall(english=True)
+        loaded = []
+        items = [i for i in self.items() if i.key == "desktop" or i.xdg_key == "PICTURES"
+                 or i.kind == KIND_FOLDER]
+        restore.RestoreEngine(self.layout.current_dir, items, here_desktop="cinnamon",
+                              meta=self.layout.read_meta(), dconf_dump=lambda t: None,
+                              dconf_load=lambda p: loaded.append(read(p))).run()
+        self.assertTrue(os.path.exists(os.path.join(new_home, "Imagens", "fundo.jpg")))
+        self.assertIn(os.path.join(new_home, "Imagens", "fundo.jpg"), loaded[0])
+
+    def test_old_export_rewrites_the_home_it_records(self):
+        from salvaguarda.core import desktop
+
+        self.config.set_enabled(KIND_PRESET, "desktop", True)
+        self.backup_with_meta()
+        export = os.path.join(self.layout.current_dir, "Extras", "definicoes-do-ambiente-de-trabalho.ini")
+        os.makedirs(os.path.dirname(export), exist_ok=True)
+        with open(export, "w") as fh:
+            fh.write(desktop.dump_header("cinnamon", "/home/ana", {"PICTURES": "~/Imagens"}))
+            fh.write("[org/x/editor]\nlast-folder='file:///home/ana/Imagens'\n")
+        new_home = self.reinstall(english=True)
+        meta = dict(self.layout.read_meta(), pasta_pessoal=new_home,
+                    pastas_xdg={"PICTURES": "~/Pictures"}, ambiente="gnome")
+        loaded = []
+        items = [i for i in restore.items_for_tree(self.layout.current_dir, meta)
+                 if i.is_settings_export]
+        restore.RestoreEngine(self.layout.current_dir, items, here_desktop="cinnamon", meta=meta,
+                              dconf_dump=lambda t: None,
+                              dconf_load=lambda p: loaded.append(read(p))).run()
+        self.assertIn("file://{}/Pictures".format(new_home), loaded[0])
+        self.assertNotIn("/home/ana", loaded[0])
 
     def test_restore_goes_through_a_link_to_a_folder(self):
         """Dotfiles kept with stow: ~/.config/app is a link to ~/dotfiles/app."""

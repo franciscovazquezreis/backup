@@ -555,7 +555,8 @@ def section_lmstudio(home: str) -> Optional[Section]:
     for base in (os.path.join(home, ".lmstudio/models"),
                  os.path.join(home, ".cache/lm-studio/models")):
         try:
-            publishers = sorted(e for e in os.scandir(base) if e.is_dir(follow_symlinks=False))
+            publishers = sorted((e for e in os.scandir(base) if e.is_dir(follow_symlinks=False)),
+                                key=lambda e: e.name)
         except OSError:
             continue
         for publisher in publishers:
@@ -723,7 +724,11 @@ def write_if_changed(target: str, text: str) -> bool:
     """Like system.dconf_dump: keep the date stable when only the generation line changed."""
     def body(t: str) -> str:
         return "\n".join(l for l in t.splitlines() if not l.startswith(STAMP_PREFIX))
-    current = _read(target, 64 << 20)
+    try:  # read back the way it is written, or a non-UTF-8 name never compares equal
+        with open(target, encoding="utf-8", errors="surrogateescape") as fh:
+            current: Optional[str] = fh.read(64 << 20)
+    except OSError:
+        current = None
     if current is not None and body(current) == body(text):
         return False
     os.makedirs(os.path.dirname(target), exist_ok=True)

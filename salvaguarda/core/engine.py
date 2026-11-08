@@ -121,6 +121,7 @@ class Question:
     data: Dict[str, object] = field(default_factory=dict)
     # Answer when nobody can be asked (keyboard shortcut, no terminal). Empty: options[0].
     unattended: str = ""
+    unattended_text: str = ""  # what that answer does, said to whoever reads the output
 
 
 @dataclass
@@ -216,6 +217,7 @@ class BackupEngine:
         self.version_dir: Optional[str] = None
         self.pruned: List[str] = []
         self.tolerance_ns = 1
+        self.ignores_case = False
         self.progress = Progress()
         self._pass = _Pass(dry=True)
         self._plan: Optional[Stats] = None
@@ -233,6 +235,7 @@ class BackupEngine:
         self._dest_ids: Set[Tuple[int, int]] = set()
         self._previous_app = ""
         self._defer_shrink = False  # upgrade question not answered: nothing leaves the copy
+        self._skipped_open: List[str] = []  # mirrors of apps left out because they were open
         self._shrink_samples: List[str] = []
 
     # ------------------------------------------------------------------ helpers
@@ -382,6 +385,7 @@ class BackupEngine:
             fileops.raise_for_dest(exc, "Não foi possível preparar o disco")
         self._lock()
         self.tolerance_ns = fsinfo.time_granularity_ns(self.layout.computer_dir)
+        self.ignores_case = fsinfo.ignores_case(self.layout.computer_dir)
 
         meta = self.layout.read_meta()
         self._previous_app = str(meta.get("versao_app") or "")
@@ -419,8 +423,10 @@ class BackupEngine:
         if self.warn_open_apps and self.running_processes is not None:
             running = self.running_processes()
             open_apps = []
-            for src in self.res.sources:
+            open_sources = []
+            for src in list(self.res.sources) + list(self.res.nested):
                 if src.processes and running.intersection(src.processes):
+                    open_sources.append(src)
                     if src.label not in open_apps:
                         open_apps.append(src.label)
             if open_apps:
@@ -432,8 +438,19 @@ class BackupEngine:
                     "mas o histórico ou as mensagens mais recentes podem ficar de fora.",
                     [("cancel", "Cancelar"), ("continue", "Continuar mesmo assim")],
                     details=open_apps,
+                    unattended="skip_open",
+                    unattended_text="sem terminal interativo: a cópia continua sem estas apps, "
+                                    "e a cópia que já existe delas fica como estava",
                 )
-                if self.cb.ask(question) != "continue":
+                answer = self.cb.ask(question)
+                if answer == "skip_open":
+                    # Nobody to ask (keyboard shortcut): copy everything else and leave the
+                    # copy of these apps as it was, instead of cancelling every run.
+                    self._skipped_open = [self.layout.mirror_abs(s.mirror_rel)
+                                          for s in open_sources]
+                    self.notes.append("Estas apps estavam abertas e a cópia delas ficou como "
+                                      "estava: {}.".format(", ".join(open_apps)))
+                elif answer != "continue":
                     raise Cancelled()
 
         if self.res.wants_dconf and self.dconf_dump is not None:
@@ -453,6 +470,9 @@ class BackupEngine:
                     self.notes.append("A lista de programas instalados não foi atualizada: " + error)
 
         self._root_mirrors = {self.layout.mirror_abs(s.mirror_rel) for s in self.res.sources}
+        for mirror in self._skipped_open:  # open apps left as they were (see above)
+            self._root_mirrors.add(mirror)
+            self._protect(mirror)
         self._root_ancestors = set()
         for mirror in self._root_mirrors:
             parent = os.path.dirname(mirror)
@@ -514,6 +534,8 @@ class BackupEngine:
                 [("cancel", "Cancelar"), ("continue", "Continuar")],
                 details=list(self._shrink_samples),
                 unattended="later",
+                unattended_text="sem terminal interativo: a cópia continua e estes itens ficam "
+                                "na «Cópia atual» até decidires numa cópia feita na janela",
             )
             answer = self.cb.ask(question)
             if answer == "later":
@@ -522,9 +544,10 @@ class BackupEngine:
                 self._defer_shrink = True
                 self.notes.append(fmt.agree(
                     count, "Um item que esta versão deixa de copiar ficou na «Cópia atual». "
-                           "Abre a Salvaguarda para decidir.",
-                    "{} itens que esta versão deixa de copiar ficaram na «Cópia atual». Abre a "
-                    "Salvaguarda para decidir.".format(fmt.number(count))))
+                           "Faz uma cópia a partir da janela da Salvaguarda para decidir.",
+                    "{} itens que esta versão deixa de copiar ficaram na «Cópia atual». Faz "
+                    "uma cópia a partir da janela da Salvaguarda para decidir.".format(
+                        fmt.number(count))))
             elif answer != "continue":
                 raise Cancelled()
             asked_shrink = True
@@ -592,8 +615,11 @@ class BackupEngine:
     # -------------------------------------------------------------------- pass
     def _run_pass(self, dry: bool) -> Stats:
         self._pass = _Pass(dry)
+        skipped = set(self._skipped_open)
         for src in self.res.sources:
             self._check_cancel()
+            if self.layout.mirror_abs(src.mirror_rel) in skipped:
+                continue
             try:
                 self._process_root(src)
             except EntryError as exc:  # the other items are still copied
@@ -642,7 +668,9 @@ class BackupEngine:
                 d_st = None
             self._ensure_parents(dst)
             self._scanned(src.path)
-            self._sync_file(src.path, dst, st, d_st, src)
+            # A selected file that is a link (a "stow" dotfiles folder) is read from what it
+            # points to; links found inside folders are still copied as links.
+            self._sync_file(src.path, dst, st, d_st, src, os.path.realpath(src.path))
         else:
             self._protect(dst)
             if self._pass.dry:
@@ -747,7 +775,9 @@ class BackupEngine:
                     child_dst in self._root_ancestors and entry.is_symlink()):
                 # Another selected item copies this place itself, through real folders
                 # (a link it follows, for example): this item leaves it alone.
-                dst_entries.pop(name, None)
+                d = dst_entries.pop(name, None)
+                if child_dst not in self._root_mirrors:
+                    self._retire_below(child_dst, _entry_lstat(d), src)
                 continue
             child_rel = None if home_rel is None else (name if home_rel == "" else home_rel + "/" + name)
             self._scanned(child_src)
@@ -796,8 +826,8 @@ class BackupEngine:
                 d = dst_entries.pop(name, None)
                 d_st = _entry_lstat(d)
                 if d_st is not None and not stat.S_ISDIR(d_st.st_mode):
-                    if self._type_change_kept(child_src, child_dst):
-                        continue
+                    # A link or a file in the copy holds nothing below it: the real folder
+                    # takes its place (the link or file goes to «Versões anteriores»).
                     self._archive(child_dst, d_st, src)
                     d_st = None
                 self._sync_dir(child_src, child_dst, est, sub, src, root_dev, child_rel,
@@ -860,15 +890,45 @@ class BackupEngine:
                 stats.meta_updates += 1
 
     def _type_change_kept(self, child_src: str, child_dst: str) -> bool:
-        """A folder of the copy that something else still needs (a missing or nested item)
-        is never replaced by a file or a link: it stays, and the new entry waits."""
+        """A folder of the copy that holds something still needed (a missing or nested item
+        that is really there) is never replaced by a file or a link: it stays, and the new
+        entry waits."""
         if not self._is_kept(child_dst):
             return False
+        below = child_dst + os.sep
+        if not any((k == child_dst or k.startswith(below)) and os.path.lexists(k)
+                   for k in self._keep):
+            return False  # nothing needed is really in it: the usual replacement applies
         if self._pass.dry:
             self._issue(child_src, "Passou de pasta a ficheiro (ou ao contrário). A cópia "
                                    "anterior foi mantida, porque ainda é precisa, e esta "
                                    "não foi copiada.")
         return True
+
+    def _retire_below(self, mirror_path: str, d_st: Optional[os.stat_result],
+                      src: ResolvedSource) -> None:
+        """``mirror_path`` is now a link on the computer, above another selected item that
+        copies itself through real folders. What else the copy holds there is no longer
+        copied by anyone: it goes to «Versões anteriores» instead of staying stale."""
+        if d_st is None or not stat.S_ISDIR(d_st.st_mode):
+            return  # a link or file there is replaced by the root below (real folders)
+        try:
+            entries = _list_dir(mirror_path)
+        except OSError:
+            return
+        for entry in entries:
+            self._check_cancel()
+            path = entry.path
+            if entry.name.startswith(TMP_PREFIX) or path in self._root_mirrors \
+                    or self._is_kept(path) and path not in self._root_ancestors:
+                continue
+            e_st = _entry_lstat(entry)
+            if e_st is None:
+                continue
+            if path in self._root_ancestors:
+                self._retire_below(path, e_st, src)
+                continue
+            self._archive(path, e_st, src, removed=True)
 
     def _sync_loose(self, src: ResolvedSource, dst: str) -> None:
         """Loose files directly in the home folder (folders and dotfiles are handled elsewhere)."""
@@ -949,7 +1009,8 @@ class BackupEngine:
                 self._archive(child_dst, d_st_child, src, removed=True)
 
     def _sync_file(self, spath: str, dpath: str, est: os.stat_result,
-                   d_st: Optional[os.stat_result], src: ResolvedSource) -> None:
+                   d_st: Optional[os.stat_result], src: ResolvedSource,
+                   read_path: Optional[str] = None) -> None:
         p = self._pass
         stats = p.stats
         stats.source_files += 1
@@ -979,7 +1040,7 @@ class BackupEngine:
         tmp = fileops.tmp_name(os.path.dirname(dpath))
         warning = None
         try:
-            used = fileops.copy_file(spath, tmp, self._on_bytes, self._check_cancel)
+            used = fileops.copy_file(read_path or spath, tmp, self._on_bytes, self._check_cancel)
         except fileops.ChangedWhileCopying as changed:
             used = changed.st
             warning = "Estava a ser alterado durante a cópia; volta a ser copiado na próxima vez."
@@ -1080,6 +1141,12 @@ class BackupEngine:
                  src: Optional[ResolvedSource]) -> None:
         """Put ``tmp`` in place of ``dpath``, saving the previous version when there is one."""
         if d_st is None:
+            if self.ignores_case and os.path.lexists(dpath):
+                # FAT32 or exFAT: the copy already has this name with other capitals
+                # (another file of the same folder, or its old name); renaming would replace it.
+                raise EntryError("A cópia já tem um ficheiro com este nome escrito com outras "
+                                 "maiúsculas e minúsculas, e o formato do disco não as "
+                                 "distingue. Não foi copiado, para não substituir o outro.")
             try:
                 os.rename(tmp, dpath)
             except OSError as exc:
@@ -1146,6 +1213,13 @@ class BackupEngine:
         """Entries of items that are no longer selected leave the mirror (to the versions)."""
         anchors = {self.layout.mirror_abs(s.mirror_rel) for s in self.res.sources
                    if not s.shallow_files} | self._keep
+        inside = self.layout.current_dir + os.sep
+        for anchor in list(anchors):
+            # Kept below a link left in the mirror (snap "current" -> "x5"): what the link
+            # points to stays too, or the kept item would leave the copy with it.
+            real = os.path.realpath(anchor)
+            if real != anchor and real.startswith(inside):
+                anchors.add(real)
         ancestors: Set[str] = set()
         for anchor in anchors:
             parent = os.path.dirname(anchor)
