@@ -119,6 +119,31 @@ class RepositoryStateTest(FinderTestCase):
         self.assertFalse(os.path.exists(marker))
         self.assertTrue(self.by_rel(result)["~/Projetos/zip"].git.checked)
 
+    def test_filter_that_cannot_be_disabled_never_runs(self) -> None:
+        """git -c splits at the first "=": a filter named "a=b" cannot be switched off, so
+        the repository must not get "git status" at all (here and through an include)."""
+        marker = os.path.join(self.tmp, "correu")
+        hostile = 'clean = "sh -c \'touch %s; cat\'"\n\tprocess = "sh -c \'touch %s\'"\n' % (
+            marker, marker)
+        p = self.repo("Projetos/direto", {".gitattributes": "* filter=a=b\n", "a.txt": "1\n"})
+        with open(os.path.join(p, ".git", "config"), "a") as fh:
+            fh.write('[filter "a=b"]\n\t' + hostile)
+        q = self.repo("Projetos/incluido", {".gitattributes": "* filter=x=y\n", "a.txt": "1\n"})
+        with open(os.path.join(self.tmp, "extra.cfg"), "w") as fh:
+            fh.write('[filter "x=y"]\n\t' + hostile)
+        with open(os.path.join(q, ".git", "config"), "a") as fh:
+            fh.write("[include]\n\tpath = %s\n" % os.path.join(self.tmp, "extra.cfg"))
+        for path in (p, q):
+            self.pushed(path)
+            os.utime(os.path.join(path, "a.txt"), (1700000000, 1700000000))  # stale index
+        found = self.by_rel(self.find())
+        self.assertFalse(os.path.exists(marker))
+        for rel in ("~/Projetos/direto", "~/Projetos/incluido"):
+            g = found[rel].git
+            self.assertIsNone(g.changed, rel)
+            self.assertIn("não é seguro", g.note, rel)
+            self.assertEqual(projects.level(found[rel]), projects.LEVEL_UNKNOWN, rel)
+
     def test_commits_only_on_a_local_bare_remote_are_not_sent(self) -> None:
         p = self.repo("Projetos/misto")
         self.pushed(p)
@@ -158,6 +183,36 @@ class RepositoryStateTest(FinderTestCase):
         wt = found["~/Projetos/app/.claude/worktrees/x"]
         self.assertTrue(wt.worktree)
         self.assertEqual((wt.git.untracked, wt.parent), (1, p))
+
+    def test_copied_worktree_with_commits_outside_the_copy(self) -> None:
+        """The worktree's files are copied, its commits (in the main repository) are not."""
+        main = os.path.join(self.tmp, "media", "Dados", "app")
+        os.makedirs(main)
+        self.git(main, "init", "-q")
+        with open(os.path.join(main, "a.txt"), "w") as fh:
+            fh.write("1\n")
+        self.git(main, "add", "-A")
+        self.git(main, "commit", "-q", "-m", "primeiro")
+        self.git(main, "remote", "add", "origin", "https://github.com/ana/app.git")
+        self.git(main, "update-ref", "refs/remotes/origin/main", "HEAD")
+        wt = os.path.join(self.home, "Projetos", "app-wt")
+        self.git(main, "worktree", "add", "-q", "-b", "feature", wt)
+        self.commit(wt, "b.txt")
+        self.config.add_path(KIND_FOLDER, os.path.join(self.home, "Projetos"))
+        found = self.by_rel(self.find())["~/Projetos/app-wt"]
+        self.assertTrue(found.covered)
+        self.assertEqual(found.commits_elsewhere, main)
+        self.assertTrue(projects.history_elsewhere(found))
+        self.assertFalse(projects.in_backup(found))
+        self.assertTrue(any("não vai para a cópia" in r for r in projects.reasons(found)))
+        result = projects.ScanResult(projects=[found])
+        self.assertEqual(controller.projects_at_risk(self.config, result), [found])
+        self.assertEqual(controller.projects_only_here(self.config, result), [])
+        # Once pushed, the copy of the files is all that is missing: nothing to warn about.
+        self.git(main, "update-ref", "refs/remotes/origin/feature", "feature")
+        found = self.by_rel(self.find())["~/Projetos/app-wt"]
+        self.assertFalse(projects.history_elsewhere(found))
+        self.assertTrue(projects.in_backup(found))
 
     def test_deep_nested_repository_still_counts_for_its_parent(self) -> None:
         """A repository too deep to be reported on its own is a new folder of its parent."""

@@ -125,6 +125,38 @@ class ConfigEvolutionTests(SandboxTestCase):
             self.assertTrue(all(isinstance(x, str) and len(x) > 1 for x in config.settings.custom_excludes), name)
             self.assertFalse(os.path.exists(cfgmod.config_path() + ".danificado"), name)
 
+    def test_adopting_a_newer_snapshot_keeps_its_unknown_keys(self):
+        snap = json.loads(json.dumps(self.BASE))
+        snap.pop("destinations")
+        snap["agenda"] = {"hora": 9}
+        snap["settings"]["agendamento_diario"] = True
+        snap["settings"]["find_projects"] = False
+        config = cfgmod.Config()
+        config.adopt_snapshot(snap)
+        data = config.to_dict()
+        self.assertEqual(data["agenda"], {"hora": 9})
+        self.assertIs(data["settings"]["agendamento_diario"], True)
+        self.assertIs(data["settings"]["find_projects"], False)
+        self.assertEqual(data["destinations"], [])
+
+    def test_folder_names_that_are_not_utf8_can_be_saved(self):
+        name = os.fsdecode(b"M\xfasica antiga")  # Latin-1, from an old archive
+        config = cfgmod.Config()
+        config.add_path(cfgmod.KIND_FOLDER, os.path.join(self.home, name))
+        config.settings.ignored_projects.append("~/" + name)
+        cfgmod.save(config)
+        again = cfgmod.load()
+        self.assertEqual(again.sources[-1].key, config.sources[-1].key)
+        self.assertEqual(again.settings.ignored_projects, ["~/" + name])
+        folder = os.path.dirname(cfgmod.config_path())
+        self.assertEqual([f for f in os.listdir(folder) if f.endswith(".tmp")], [])
+        # The usual case keeps readable accents.
+        config = cfgmod.Config()
+        config.computer_name = "computador-joão"
+        cfgmod.save(config)
+        with open(cfgmod.config_path(), encoding="utf-8") as fh:
+            self.assertIn("joão", fh.read())
+
     def test_top_level_list_does_not_crash(self):
         self.write_config([self.BASE])
         self.assertFalse(cfgmod.load().configured)

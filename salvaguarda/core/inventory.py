@@ -695,9 +695,17 @@ def write_if_changed(target: str, text: str) -> bool:
         return False
     os.makedirs(os.path.dirname(target), exist_ok=True)
     tmp = target + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(text)
-    os.replace(tmp, target)
+    try:
+        # surrogateescape: a folder name that is not valid UTF-8 keeps its own bytes
+        with open(tmp, "w", encoding="utf-8", errors="surrogateescape") as fh:
+            fh.write(text)
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     return True
 
 

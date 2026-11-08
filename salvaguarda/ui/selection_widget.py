@@ -247,10 +247,14 @@ class SelectionWidget(Gtk.Box):
         only_here = controller.projects_only_here(self.config, result)
         if at_risk:
             box.pack_start(common.label("Projetos fora da cópia", ("sg-heading",)), False, False, 0)
-            box.pack_start(common.label(
-                "Estes projetos estão em pastas que não vão para a cópia. Não estão no GitHub, "
-                "ou têm trabalho por enviar, por isso só existem neste computador.",
-                ("sg-dim", "sg-small"), wrap=True, max_chars=70), False, False, 0)
+            box.pack_start(common.label(fmt.agree(
+                len(at_risk),
+                "Este projeto tem ficheiros ou commits que só existem neste computador (por "
+                "enviar para o GitHub, fora do git ou ignorados pelo git) e que não vão para "
+                "a cópia.",
+                "Estes projetos têm ficheiros ou commits que só existem neste computador (por "
+                "enviar para o GitHub, fora do git ou ignorados pelo git) e que não vão para "
+                "a cópia."), ("sg-dim", "sg-small"), wrap=True, max_chars=70), False, False, 0)
             listbox = common.boxed_list()
             for project in at_risk:
                 listbox.add(self._project_row(project, actions=True))
@@ -265,10 +269,14 @@ class SelectionWidget(Gtk.Box):
                 "{} projetos só existem neste computador e na cópia".format(len(only_here))))
             inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
             inner.set_margin_top(6)
-            inner.pack_start(common.label(
+            inner.pack_start(common.label(fmt.agree(
+                len(only_here),
+                "Já vai para a cópia, mas não está no GitHub nem noutro remoto. Se este "
+                "computador e o disco das cópias se estragarem, perde-se. Envia-o para o "
+                "GitHub ou faz cópias com frequência.",
                 "Já vão para a cópia, mas não estão no GitHub nem noutro remoto. Se este "
                 "computador e o disco das cópias se estragarem, perdem-se. Envia-os para o "
-                "GitHub ou faz cópias com frequência.", ("sg-dim", "sg-small"), wrap=True,
+                "GitHub ou faz cópias com frequência."), ("sg-dim", "sg-small"), wrap=True,
                 max_chars=70), False, False, 0)
             listbox = common.boxed_list()
             for project in only_here[:50]:
@@ -290,17 +298,23 @@ class SelectionWidget(Gtk.Box):
         parts = ["Procura feita em {} ({}).".format(
             fmt.plural(result.dirs, "pasta", "pastas"),
             fmt.duration(result.walk_seconds + result.git_seconds))]
+        def where(items: List[str]) -> str:
+            return paths.safe_text(", ".join(paths.display_path(p) for p in items[:3]))
+
         if result.other_filesystems:
-            parts.append("Não foi possível procurar em: {} (outro disco).".format(
-                ", ".join(paths.display_path(p) for p in result.other_filesystems[:3])))
+            parts.append("Não foi possível procurar em {} ({}).".format(
+                where(result.other_filesystems),
+                fmt.agree(len(result.other_filesystems), "outro disco", "outros discos")))
         if result.network_skipped:
-            parts.append("{} (pasta de rede).".format(
-                ", ".join(paths.display_path(p) for p in result.network_skipped[:3])))
+            parts.append("Não foi possível procurar em {} ({}).".format(
+                where(result.network_skipped),
+                fmt.agree(len(result.network_skipped), "pasta de rede", "pastas de rede")))
         if result.truncated:
             parts.append("A procura parou antes do fim: a pasta pessoal é muito grande.")
         if result.too_deep_count:
-            parts.append("{} ficaram de fora por estarem muito fundas.".format(
-                fmt.plural(result.too_deep_count, "pasta", "pastas")))
+            n = result.too_deep_count
+            parts.append(fmt.agree(n, "1 pasta ficou de fora por estar muito funda.",
+                                   "{} pastas ficaram de fora por estarem muito fundas.".format(n)))
         if not result.git_available:
             parts.append("O git não está instalado: não é possível saber o que falta enviar.")
         return " ".join(parts)
@@ -311,9 +325,22 @@ class SelectionWidget(Gtk.Box):
         suffix = None
         if actions:
             buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-            if project.blocked:
+            target = project.commits_elsewhere if projects.history_elsewhere(project) \
+                else project.path
+            storable = paths.safe_text(target) == target
+            if not storable:
+                lines.append("O nome desta pasta tem caracteres que as definições não "
+                             "conseguem guardar. Muda-lhe o nome para a poderes copiar.")
+            elif project.blocked:
                 lines.append("Está numa pasta temporária que o sistema apaga. Move o projeto "
                              "para a pasta pessoal.")
+            elif projects.history_elsewhere(project):
+                lines.append("A pasta vai para a cópia, mas os commits estão no repositório "
+                             "principal, que não vai.")
+                add = Gtk.Button.new_with_label("Adicionar o repositório principal")
+                add.set_tooltip_text(paths.safe_text(paths.display_path(target)))
+                add.connect("clicked", lambda *_: self._add(KIND_PROJECT, target))
+                buttons.pack_start(add, False, False, 0)
             elif project.excluded_by:
                 lines.append("Está numa pasta copiada, mas a exclusão «{}» deixa-o de fora. "
                              "Podes mudar as exclusões nas Definições.".format(project.excluded_by))
@@ -325,11 +352,13 @@ class SelectionWidget(Gtk.Box):
                 add.set_tooltip_text("Passa a ir para a cópia, como projeto de programação")
                 add.connect("clicked", lambda *_: self._add(KIND_PROJECT, project.path))
                 buttons.pack_start(add, False, False, 0)
-            ignore = Gtk.Button.new_from_icon_name("window-close-symbolic", Gtk.IconSize.BUTTON)
-            ignore.set_relief(Gtk.ReliefStyle.NONE)
-            ignore.set_tooltip_text("Não voltar a avisar sobre este projeto")
-            ignore.connect("clicked", lambda *_: self._ignore_project(project.path))
-            buttons.pack_start(ignore, False, False, 0)
+            if paths.safe_text(project.path) == project.path:
+                ignore = Gtk.Button.new_from_icon_name("window-close-symbolic",
+                                                       Gtk.IconSize.BUTTON)
+                ignore.set_relief(Gtk.ReliefStyle.NONE)
+                ignore.set_tooltip_text("Não voltar a avisar sobre este projeto")
+                ignore.connect("clicked", lambda *_: self._ignore_project(project.path))
+                buttons.pack_start(ignore, False, False, 0)
             suffix = buttons
         if reasons:
             lines.append(" · ".join(reasons))

@@ -50,20 +50,33 @@ class SalvaguardaApp(Gtk.Application):
     def installed_version(self) -> str:
         return portable.source_version(portable.package_dir())
 
+    def _open_dialog(self) -> Optional[Gtk.Window]:
+        """A dialog of this app on screen (its own run() loop would outlive the window)."""
+        for win in Gtk.Window.list_toplevels():
+            if (win is not self.window and win.get_visible()
+                    and win.get_window_type() == Gtk.WindowType.TOPLEVEL
+                    and (win.get_transient_for() is not None or win.get_modal())):
+                return win
+        return None
+
     def _check_update(self) -> bool:
         installed = self.installed_version()
         if not installed or installed == VERSION or installed == self._update_seen:
             return False
         self._update_seen = installed
-        if self.window.busy():
-            common.message(self.window, "Foi instalada a versão {}".format(installed),
-                           "Quando a tarefa terminar, fecha a Salvaguarda e volta a abri-la para "
-                           "usar a nova versão.")
+        newer = portable.version_key(installed) > portable.version_key(VERSION)
+        title = "Foi instalada a versão {}".format(installed)
+        target = "a versão nova" if newer else "a versão instalada"
+        dialog = self._open_dialog()
+        if self.window.busy() or dialog is not None:
+            common.message(dialog or self.window, title,
+                           "Quando terminares, fecha a Salvaguarda e volta a abri-la para usar "
+                           "{}.".format(target))
             return False
         answer = common.choose(
-            self.window, "Foi instalada a versão {}".format(installed),
-            "Esta janela ainda é a versão {}. Reinicia a Salvaguarda para usar a nova versão; "
-            "as tuas escolhas e cópias ficam como estão.".format(VERSION),
+            self.window, title,
+            "Esta janela ainda é a versão {}. Reinicia a Salvaguarda para usar {}; as tuas "
+            "escolhas e cópias ficam como estão.".format(VERSION, target),
             [("later", "Mais tarde"), ("restart", "Reiniciar agora")], suggested="restart")
         if answer == "restart":
             self.restart_requested = True
@@ -79,6 +92,10 @@ class SalvaguardaApp(Gtk.Application):
 def run(argv: Optional[List[str]] = None) -> int:
     app = SalvaguardaApp()
     status = app.run(argv if argv is not None else sys.argv)
+    if app.window is not None:
+        # exec skips the normal exit: let the project search stop its git commands first.
+        app.window.projects.stop()
+        app.window.projects.wait(2.0)
     if app.restart_requested and os.access(INSTALLED_LAUNCHER, os.X_OK):
         # exec keeps nothing of the old code; the D-Bus name is released on exec.
         os.execv(INSTALLED_LAUNCHER, [INSTALLED_LAUNCHER])

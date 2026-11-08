@@ -551,6 +551,10 @@ def remote_host(url: str) -> str:
 
 
 _PROTOCOLS = ("file", "git", "http", "https", "ssh", "ext")
+# "git -c key=value" splits at the first "=", so a filter whose name holds "=" (or other
+# odd characters) cannot be switched off from the command line: such a repository never
+# gets "git status", the only command here that runs filters.
+_SAFE_FILTER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 
 
 def _git_command(git: str, root: str, filters: Sequence[str]) -> List[str]:
@@ -560,6 +564,8 @@ def _git_command(git: str, root: str, filters: Sequence[str]) -> List[str]:
     for proto in _PROTOCOLS:
         cmd += ["-c", "protocol.%s.allow=never" % proto]
     for name in filters:  # the repository's own filter commands never run
+        if not _SAFE_FILTER.match(name):
+            continue  # inspect_repo never runs "git status" with one of these
         for key in ("clean", "smudge", "process"):
             cmd += ["-c", "filter.%s.%s=" % (name, key)]
         cmd += ["-c", "filter.%s.required=false" % name]
@@ -732,11 +738,14 @@ def inspect_repo(project: Project, git: Optional[str], excl: Exclusions,
         code, out, _ = run_git(_git_command(git, project.path, ()) + [
             "config", "-z", "--get-regexp", r"^filter\..*\.(clean|smudge|process)$"],
             env, timeout, cancel)
+        # 1 means "no filter at all"; anything else, and the list cannot be trusted.
+        filters_known = code in (0, 1)
         if code == 0:
             for item in out.split(b"\0"):
                 key = os.fsdecode(item.split(b"\n", 1)[0])
                 if key.count(".") >= 2 and key[7:key.rfind(".")] not in filters:
                     filters.append(key[7:key.rfind(".")])
+        unsafe_filters = not filters_known or any(not _SAFE_FILTER.match(n) for n in filters)
         cmd = _git_command(git, project.path, filters)
         code, out, err = run_git(cmd + ["for-each-ref", "--format=%(objectname) %(refname)",
                                         "refs/heads", "refs/remotes", "refs/stash"],
@@ -772,6 +781,10 @@ def inspect_repo(project: Project, git: Optional[str], excl: Exclusions,
         elif info.foreign_owner:
             # Another user's configuration could run commands during "git status".
             info.note = "Pertence a outro utilizador: as alterações não foram verificadas"
+        elif unsafe_filters:
+            # Its filters could run commands during "git status" and cannot be disabled.
+            info.note = ("Tem definições do git que não é seguro usar: as alterações não "
+                         "foram verificadas")
         else:
             args = ["status", "--porcelain=v2", "--branch", "-z", "--ignore-submodules=dirty"]
             if project.home_repo:
@@ -1109,6 +1122,9 @@ def reasons(project: Project) -> List[str]:
     if g.ignored_count:
         out.append("Ficheiros que o git ignora, só neste computador: {}".format(
             _names(g.ignored)))
+    if history_elsewhere(project):
+        out.append("Os commits estão em {}, que não vai para a cópia".format(
+            paths.safe_text(paths.display_path(project.commits_elsewhere))))
     if g.note:
         out.append(g.note)
     if not out and g.checked:
@@ -1116,12 +1132,20 @@ def reasons(project: Project) -> List[str]:
     return out
 
 
+def history_elsewhere(project: Project) -> bool:
+    """A copied worktree whose commits live in a main repository that is not copied, with
+    commits that are on no remote: the copy holds the files but not that history."""
+    g = project.git
+    return bool(project.covered and project.commits_elsewhere and g is not None
+                and (g.unpushed or g.commits or g.stashes))
+
+
 def in_backup(project: Project) -> bool:
     """True when the backup holds everything git cannot get back from a remote: the
-    project is copied, or it is a clean worktree whose commits are copied with the main
-    repository."""
+    project is copied (with its commits), or it is a clean worktree whose commits are
+    copied with the main repository."""
     if project.covered:
-        return True
+        return not history_elsewhere(project)
     g = project.git
     return bool(project.commits_covered_by and g is not None and g.changed == 0
                 and g.untracked == 0 and not g.ignored_count)

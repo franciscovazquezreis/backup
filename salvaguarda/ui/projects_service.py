@@ -32,6 +32,7 @@ class ProjectScanner(GObject.Object):
         self.finished_at = 0.0
         self.running = False
         self._cancel: Optional[threading.Event] = None
+        self._thread: Optional[threading.Thread] = None
         self._last_progress = 0.0
 
     @property
@@ -64,7 +65,8 @@ class ProjectScanner(GObject.Object):
                 result = None
             GLib.idle_add(self._done, result, cancel)
 
-        threading.Thread(target=work, name="salvaguarda-projects", daemon=True).start()
+        self._thread = threading.Thread(target=work, name="salvaguarda-projects", daemon=True)
+        self._thread.start()
         self.emit("updated")
         return False
 
@@ -91,3 +93,9 @@ class ProjectScanner(GObject.Object):
     def stop(self) -> None:
         if self._cancel is not None:
             self._cancel.set()
+
+    def wait(self, seconds: float) -> None:
+        """After stop(): give the search a moment to end its git commands."""
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(seconds)

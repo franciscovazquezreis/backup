@@ -148,7 +148,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def save_config(self) -> None:
         try:
             cfgmod.save(self.config)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:  # UnicodeError is a ValueError
             common.message(self, "Não foi possível guardar as definições", str(exc),
                            Gtk.MessageType.ERROR)
 
@@ -196,6 +196,10 @@ class MainWindow(Gtk.ApplicationWindow):
             self.config.computer_name = working.computer_name
             self.save_config()
         dialog.destroy()
+        if self.config.settings.find_projects:
+            self.projects.request()
+        else:
+            self.projects.stop()
         self.refresh()
 
     def show_history(self) -> None:

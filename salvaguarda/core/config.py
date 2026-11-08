@@ -163,6 +163,12 @@ class Config:
         self.settings = other.settings
         if other.computer_name:
             self.computer_name = other.computer_name
+        # Keys written by a newer version stay, so that version finds them again.
+        self._unknown_settings = dict(getattr(other, "_unknown_settings", {}))
+        unknown = dict(getattr(self, "_unknown", {}))
+        unknown.update(getattr(other, "_unknown", {}))
+        self._unknown = unknown
+        self.version = max(self.version, other.version)
 
 
 def config_path() -> str:
@@ -196,12 +202,26 @@ def write_json_atomic(path: str, data: Any) -> None:
     folder = os.path.dirname(path)
     os.makedirs(folder, exist_ok=True)
     tmp = os.path.join(folder, ".{}.{}.tmp".format(os.path.basename(path), os.getpid()))
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, ensure_ascii=False, indent=2, sort_keys=False)
-        fh.write("\n")
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, path)
+    text = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=False) + "\n"
+    try:
+        raw = text.encode("utf-8")
+    except UnicodeEncodeError:
+        # A folder name that is not valid UTF-8 (lone surrogates): written as \udcXX
+        # escapes, which json.load turns back into the same name.
+        raw = (json.dumps(data, ensure_ascii=True, indent=2, sort_keys=False) + "\n").encode(
+            "ascii")
+    try:
+        with open(tmp, "wb") as fh:
+            fh.write(raw)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def read_json(path: str) -> Optional[Any]:
