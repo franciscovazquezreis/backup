@@ -380,7 +380,7 @@ class SelectionBehaviourTests(SandboxTestCase):
         self.write("Documentos/a.txt", "a", mtime=T0)
         self.write(".config/app/c.ini", "c", mtime=T0)
         res = selection.resolve(self.config)
-        self.assertEqual([s.path for s in res.sources], [self.home])
+        self.assertEqual([s.path for s in res.sources if not s.extra], [self.home])
         result = self.backup()
         self.assertEqual(result.status, STATUS_OK)
         self.assertEqual(result.stats.new_files, 3)  # a.txt, c.ini and user-dirs.dirs
@@ -441,6 +441,87 @@ class ExclusionBehaviourTests(SandboxTestCase):
         self.backup()
         self.assertFalse(os.path.exists(self.mirror("Documentos/ubuntu.iso")))
         self.assertFalse(os.path.exists(self.mirror("Projetos/app/build")))
+
+
+class UpgradeSafetyTests(SandboxTestCase):
+    def test_disk_prepared_by_a_newer_version_is_refused(self):
+        import json
+        self.write("Documentos/a.txt", "a", mtime=T0)
+        marker = os.path.join(self.root, "disco.json")
+        with open(marker) as fh:
+            data = json.load(fh)
+        data["formato"] = 99
+        with open(marker, "w") as fh:
+            json.dump(data, fh)
+        result = self.backup()
+        self.assertEqual(result.status, STATUS_FAILED)
+        self.assertIn("mais recente", result.message)
+        self.assertFalse(os.path.exists(self.mirror("Documentos/a.txt")))
+
+    def test_new_version_that_drops_items_asks_first(self):
+        self.write(".codex/config.toml", "model = 'x'", mtime=T0)
+        self.write(".codex/log/codex-tui.log", "log", mtime=T0)
+        self.config.set_enabled(KIND_PRESET, "ai", True)
+        self.config.settings.exclude_caches = False
+        self.backup(meta_extra={"versao_app": "1.0.0"})
+        self.assertTrue(os.path.exists(self.mirror(".codex/log/codex-tui.log")))
+        self.config.settings.exclude_caches = True
+        cb = RecordingCallbacks()
+        result = self.backup(cb, meta_extra={"versao_app": "1.1.0"})
+        self.assertEqual([q.kind for q in cb.questions], ["upgrade_shrink"])
+        self.assertEqual(result.status, STATUS_CANCELLED)
+        self.assertIn("~/.codex/log", " ".join(cb.questions[0].details))
+        self.assertTrue(os.path.exists(self.mirror(".codex/log/codex-tui.log")))
+        result = self.backup(RecordingCallbacks({"upgrade_shrink": "continue"}),
+                             meta_extra={"versao_app": "1.1.0"})
+        self.assertEqual(result.status, STATUS_OK)
+        self.assertEqual(len(self.find_in_versions(".codex/log/codex-tui.log")), 1)
+        self.assertTrue(os.path.exists(self.mirror(".codex/config.toml")))
+
+    def test_same_version_with_new_exclusion_does_not_ask(self):
+        self.write("Projetos/app/node_modules/x.js", "x", mtime=T0)
+        self.config.add_path(KIND_PROJECT, os.path.join(self.home, "Projetos"))
+        self.config.settings.exclude_dev = False
+        self.backup(meta_extra={"versao_app": "1.1.0"})
+        self.config.settings.exclude_dev = True
+        cb = RecordingCallbacks()
+        self.assertEqual(self.backup(cb, meta_extra={"versao_app": "1.1.0"}).status, STATUS_OK)
+        self.assertEqual(cb.questions, [])
+
+    def test_removed_large_settings_file_keeps_its_version(self):
+        self.config.settings.preset_versions_max_mb = 0
+        self.write(".claude/projects/app/sessao.jsonl", "conversa longa", mtime=T0)
+        self.config.set_enabled(KIND_PRESET, "ai", True)
+        self.backup()
+        os.remove(os.path.join(self.home, ".claude/projects/app/sessao.jsonl"))
+        result = self.backup()
+        self.assertEqual(result.status, STATUS_OK)
+        self.assertEqual(len(self.find_in_versions(".claude/projects/app/sessao.jsonl")), 1)
+
+    def test_inventory_is_copied_into_extras(self):
+        def fake_inventory(target):
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "w") as fh:
+                fh.write("# Programas instalados\n")
+
+        self.write("Documentos/a.txt", "a", mtime=T0)
+        result = self.backup(inventory_dump=fake_inventory)
+        self.assertEqual(result.status, STATUS_OK, result.message)
+        extra = os.path.join(self.layout.current_dir, "Extras", selection.INVENTORY_EXTRA_NAME)
+        self.assertIn("Programas instalados", read(extra))
+
+    def test_metadata_records_where_the_copy_comes_from(self):
+        from salvaguarda.core import controller
+        with mock.patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "X-Cinnamon"}):
+            meta = controller.environment_meta(self.config)
+        self.assertEqual(meta["ambiente"], "cinnamon")
+        self.assertEqual(meta["pasta_pessoal"], self.home)
+        self.assertEqual(meta["pastas_xdg"]["DOCUMENTS"], "~/Documentos")
+        self.assertTrue(meta["utilizador"])
+        with mock.patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "", "XDG_SESSION_DESKTOP": "",
+                                          "DESKTOP_SESSION": ""}), \
+                mock.patch("salvaguarda.core.system.running_process_names", return_value=set()):
+            self.assertNotIn("ambiente", controller.environment_meta(self.config))
 
 
 class DconfExtraTests(SandboxTestCase):

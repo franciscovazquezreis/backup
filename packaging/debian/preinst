@@ -1,0 +1,14 @@
+#!/bin/sh
+# Runs before the new files are unpacked, also when the old version's prerm is
+# missing or broken: stale byte-code must never block removing old directories.
+set -e
+
+case "$1" in
+    install|upgrade)
+        if [ -d /usr/share/salvaguarda ]; then
+            find /usr/share/salvaguarda -depth -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+        fi
+        ;;
+esac
+
+exit 0

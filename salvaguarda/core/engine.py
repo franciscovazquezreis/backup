@@ -30,7 +30,9 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 from . import fileops, fmt, fsinfo, paths
 from .exclusions import CATEGORY_LABELS, Exclusions
 from .fileops import Cancelled, DestinationLost, DiskFull, EntryError, Fatal
-from .layout import CURRENT_DIR, HOME_DIR, OTHER_DIR, TMP_PREFIX, DiskLayout, list_version_runs
+from .layout import (DISK_FORMAT, HOME_DIR, OTHER_DIR, TMP_PREFIX, DiskLayout, disk_format,
+                     list_version_runs, read_disk_marker)
+from .report import render_text
 from .selection import Resolution, ResolvedSource
 
 PHASE_PREPARE = "prepare"
@@ -184,6 +186,7 @@ class BackupEngine:
         warn_open_apps: bool = True,
         running_processes: Optional[Callable[[], Set[str]]] = None,
         dconf_dump: Optional[Callable[[str], Optional[str]]] = None,
+        inventory_dump: Optional[Callable[[str], Optional[str]]] = None,
         meta_extra: Optional[Dict[str, object]] = None,
         callbacks: Optional[Callbacks] = None,
         cancel_event: Optional[threading.Event] = None,
@@ -198,6 +201,7 @@ class BackupEngine:
         self.warn_open_apps = warn_open_apps
         self.running_processes = running_processes
         self.dconf_dump = dconf_dump
+        self.inventory_dump = inventory_dump
         self.meta_extra = meta_extra or {}
         self.cb = callbacks or Callbacks()
         self.cancel_event = cancel_event or threading.Event()
@@ -224,6 +228,8 @@ class BackupEngine:
         self._home = paths.home()
         self._was_interrupted = False
         self._dest_ids: Set[Tuple[int, int]] = set()
+        self._previous_app = ""
+        self._shrink_samples: List[str] = []
 
     # ------------------------------------------------------------------ helpers
     def _check_cancel(self) -> None:
@@ -361,6 +367,9 @@ class BackupEngine:
         if mount is not None and mount.read_only:
             raise Fatal("O disco de cópias está montado só para leitura. Desliga-o, volta a "
                         "ligá-lo e, se o problema continuar, verifica o disco com a app Discos.")
+        if disk_format(read_disk_marker(root)) > DISK_FORMAT:
+            raise Fatal("Este disco foi preparado por uma versão mais recente da Salvaguarda. "
+                        "Instala essa versão (ou uma mais recente) para continuar a fazer cópias nele.")
         try:
             os.makedirs(self.layout.current_dir, exist_ok=True)
         except OSError as exc:
@@ -371,6 +380,7 @@ class BackupEngine:
         self.tolerance_ns = fsinfo.time_granularity_ns(self.layout.computer_dir)
 
         meta = self.layout.read_meta()
+        self._previous_app = str(meta.get("versao_app") or "")
         current_mid = paths.machine_id()
         disk_mid = str(meta.get("machine_id") or "")
         if disk_mid and current_mid and disk_mid != current_mid:
@@ -429,6 +439,15 @@ class BackupEngine:
                 if error:
                     self._issue(target, "Definições do ambiente de trabalho não exportadas: " + error)
 
+        if self.res.wants_inventory and self.inventory_dump is not None:
+            target = next((s.path for s in self.res.sources if s.extra == "inventory"), None)
+            if target:
+                self.cb.phase(PHASE_PREPARE, "A atualizar a lista de programas instalados…")
+                self._check_cancel()
+                error = self.inventory_dump(target)
+                if error:
+                    self.notes.append("A lista de programas instalados não foi atualizada: " + error)
+
         self._root_mirrors = {self.layout.mirror_abs(s.mirror_rel) for s in self.res.sources}
         for rel in self.res.keep:
             self._protect(self.layout.mirror_abs(rel))
@@ -463,7 +482,27 @@ class BackupEngine:
     def _confirm_plan(self, plan: Stats) -> None:
         if not self.mass_change_check:
             return
-        if plan.orphan_files >= 200:
+        current_app = str(self.meta_extra.get("versao_app") or "")
+        asked_shrink = False
+        if (self._previous_app and current_app and self._previous_app != current_app
+                and (plan.orphans or plan.newly_excluded)):
+            # A new version (catalogue or exclusion rules) would take things out of the
+            # copy on its first run: never do that silently.
+            question = Question(
+                "upgrade_shrink", "Esta versão nova deixa de copiar alguns itens",
+                "Desde a versão {} da Salvaguarda, {} deixam de ser copiados (por exemplo, "
+                "caches ou programas que se reinstalam). A cópia que já existe passa para "
+                "«Versões anteriores», de onde pode ser recuperada até ao fim do prazo definido. "
+                "Se não querias isto, cancela e revê «Alterar…» e as Definições.".format(
+                    self._previous_app,
+                    fmt.plural(plan.orphans + plan.newly_excluded, "item", "itens")),
+                [("cancel", "Cancelar"), ("continue", "Continuar")],
+                details=list(self._shrink_samples),
+            )
+            if self.cb.ask(question) != "continue":
+                raise Cancelled()
+            asked_shrink = True
+        if plan.orphan_files >= 200 and not asked_shrink:
             question = Question(
                 "orphans", "Retiraste itens da lista do que copiar",
                 "A cópia desses itens ({}) sai da «Cópia atual» e passa para «Versões "
@@ -741,7 +780,7 @@ class BackupEngine:
                 continue
             if name in excluded_names:
                 stats.newly_excluded += 1
-                self._archive(child_dst, d_st, src)
+                self._archive(child_dst, d_st, src, excluded=True)
             else:
                 self._archive(child_dst, d_st, src, removed=True)
 
@@ -936,6 +975,11 @@ class BackupEngine:
 
     # ------------------------------------------------------------- versions
     def _keeps_version(self, d_st: os.stat_result, src: Optional[ResolvedSource]) -> bool:
+        """Whether a REPLACED file keeps its previous version.
+
+        The size limit only exists so that big app databases that change on every use do
+        not fill the disk; anything removed from the computer always keeps its version.
+        """
         if src is None or src.version_max_size is None:
             return True
         if stat.S_ISREG(d_st.st_mode):
@@ -987,13 +1031,17 @@ class BackupEngine:
             fileops.raise_for_dest(exc, "Não foi possível guardar o ficheiro")
 
     def _archive(self, mirror_path: str, d_st: os.stat_result, src: Optional[ResolvedSource],
-                 removed: bool = False, orphan: bool = False) -> None:
+                 removed: bool = False, orphan: bool = False, excluded: bool = False) -> None:
         """Take an entry out of the mirror (moving it to the version folder when kept)."""
         p = self._pass
         stats = p.stats
         is_dir = stat.S_ISDIR(d_st.st_mode)
         files = fileops.tree_stats(mirror_path)[0] if is_dir else 1
-        keep = self._keeps_version(d_st, src)
+        keep = True  # removals always keep their version, whatever the size
+        if p.dry and (orphan or excluded) and len(self._shrink_samples) < 8:
+            source = self._source_for_mirror(mirror_path)
+            self._shrink_samples.append(paths.display_path(source) if source
+                                        else self._rel_current(mirror_path))
         if orphan:
             stats.orphans += 1
             stats.orphan_files += files
@@ -1131,8 +1179,6 @@ class BackupEngine:
         return text[:1].upper() + text[1:]
 
     def _write_log(self, result: RunResult) -> Optional[str]:
-        from .report import render_text  # local import keeps the module graph simple
-
         if not os.path.isdir(self.layout.computer_dir):
             return None
         try:

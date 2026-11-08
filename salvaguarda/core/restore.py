@@ -9,15 +9,16 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as _dt
+import fnmatch
 import os
 import shutil
 import stat
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from . import fileops, fmt, fsinfo, paths
+from . import desktop, fileops, fmt, fsinfo, paths, postrestore, system, variants
 from .engine import (PHASE_COPY, PHASE_FINISH, PHASE_PREPARE, PHASE_SCAN, PROGRESS_INTERVAL,
                      STATUS_CANCELLED, STATUS_FAILED, STATUS_NOTHING, STATUS_OK, STATUS_WARNINGS,
                      Callbacks, Issue, Progress)
@@ -43,10 +44,20 @@ class RestoreItem:
     extra: str = ""
     original: str = ""  # where it lived, for display
     originals: List[str] = field(default_factory=list)
+    exports: List[str] = field(default_factory=list)  # generated files (Extras/...), never copied
+
+    @property
+    def settings_exports(self) -> List[str]:
+        return [rel for rel in self.exports if rel.endswith(".ini")]
 
     @property
     def is_settings_export(self) -> bool:
-        return self.extra == "dconf"
+        """The item carries desktop settings exported with dconf."""
+        return bool(self.settings_exports)
+
+    @property
+    def is_inventory(self) -> bool:
+        return self.extra == "inventory"
 
     @property
     def where(self) -> str:
@@ -109,10 +120,14 @@ def items_for_tree(tree_root: str, meta: Dict[str, object]) -> List[RestoreItem]
             order.append(key)
         item = items[key]
         if raw.get("extra"):
+            # A generated file: applied or shown, never copied back as a file.
             item.extra = str(raw.get("extra"))
+            if rel not in item.exports:
+                item.exports.append(rel)
+            continue
         if rel not in item.rels:
             item.rels.append(rel)
-            if raw.get("caminho") and not raw.get("extra"):
+            if raw.get("caminho"):
                 item.originals.append(str(raw.get("caminho")))
         if key[0] != "loose":
             covered.append(rel)
@@ -158,16 +173,100 @@ def items_for_tree(tree_root: str, meta: Dict[str, object]) -> List[RestoreItem]
             extra_items.append(_generic_item(rel, label_prefix, entry))
     extras_dir = os.path.join(tree_root, EXTRAS_DIR)
     result = [items[k] for k in order]
-    if os.path.isdir(extras_dir) and not any(i.extra for i in result):
+    if os.path.isdir(extras_dir) and not any(i.is_settings_export for i in result):
         for entry in sorted(os.scandir(extras_dir), key=lambda e: e.name):
             if entry.name.endswith(".ini"):
                 result.append(RestoreItem(
-                    "Definições do ambiente de trabalho", "preset", "desktop",
-                    [os.path.join(EXTRAS_DIR, entry.name)], "preferences-desktop-appearance-symbolic",
-                    extra="dconf",
+                    "Definições do ambiente de trabalho", "preset", "desktop", [],
+                    "preferences-desktop-appearance-symbolic", extra="dconf",
+                    exports=[os.path.join(EXTRAS_DIR, entry.name)],
                 ))
                 break
     return result + extra_items
+
+
+def old_xdg_dirs(meta: Dict[str, Any]) -> Dict[str, str]:
+    """XDG folders of the computer the copy came from (key -> "~/Imagens")."""
+    recorded = meta.get("pastas_xdg")
+    if isinstance(recorded, dict):
+        return {str(k): str(v) for k, v in recorded.items() if isinstance(v, str)}
+    result = {}
+    for raw in meta.get("fontes") or []:  # disks written by version 1.0.0
+        if isinstance(raw, dict) and raw.get("xdg") and isinstance(raw.get("caminho"), str):
+            result[str(raw["xdg"])] = raw["caminho"]
+    return result
+
+
+def plan_variants(items: List[RestoreItem],
+                  probe: Optional[variants.Probe] = None) -> Dict[str, variants.Remap]:
+    """Profiles that should go to another packaging of the same app (deb, snap, Flatpak)."""
+    probe = probe or variants.Probe(paths.home())
+    found: Dict[str, variants.Remap] = {}
+    for item in items:
+        if item.kind == "preset" and item.key in variants.APP_VARIANTS:
+            for remap in variants.plan_remaps(item.key, item.rels, probe):
+                found[remap.rel] = remap
+    return found
+
+
+class Destinations:
+    """Where each path of the copy goes on this computer."""
+
+    def __init__(self, target: str, folder: str, meta: Optional[Dict[str, Any]] = None,
+                 remaps: Optional[Dict[str, str]] = None,
+                 items: Optional[List[RestoreItem]] = None):
+        meta = meta or {}
+        self.target = target
+        self.folder = folder
+        self.home = paths.home()
+        self.remaps = remaps or {}
+        self.old_user = str(meta.get("utilizador") or "")
+        self.new_user = system.user_name()
+        new_xdg = paths.xdg_user_dirs(existing_only=False)
+        # Old XDG folder (home-relative, e.g. "Documentos") -> folder on this computer
+        # (e.g. /home/bruno/Documents when the new system is in English).
+        self.xdg_map: Dict[str, str] = {}
+        old_xdg = old_xdg_dirs(meta)
+        for item in items or []:  # without metadata, the items still say where they lived
+            if item.xdg_key and item.xdg_key not in old_xdg and item.original.startswith("~/"):
+                old_xdg[item.xdg_key] = item.original
+        for key, old in old_xdg.items():
+            if key in new_xdg and old.startswith("~/") and len(old) > 2:
+                self.xdg_map[old[2:]] = new_xdg[key]
+
+    def for_rel(self, rel: str) -> Optional[str]:
+        parts = rel.split(os.sep)
+        top, rest = parts[0], parts[1:]
+        if top not in (HOME_DIR, OTHER_DIR):
+            return None
+        if self.target == TARGET_FOLDER:
+            return os.path.join(self.folder, *rest) if rest else self.folder
+        if top == OTHER_DIR:
+            if not rest:
+                return None
+            if (self.old_user and self.new_user and self.old_user != self.new_user
+                    and len(rest) >= 2 and (rest[:2] == ["media", self.old_user]
+                                            or rest[:3] == ["run", "media", self.old_user])):
+                # Disks mounted under /media/<user>: follow the new user name when it exists.
+                index = 1 if rest[0] == "media" else 2
+                swapped = rest[:index] + [self.new_user] + rest[index + 1:]
+                if os.path.isdir(os.sep + os.path.join(*swapped[:index + 1])):
+                    rest = swapped
+            return os.sep + os.path.join(*rest)
+        if rel in self.remaps:
+            return os.path.join(self.home, self.remaps[rel])
+        home_rel = "/".join(rest)
+        for old in sorted(self.xdg_map, key=len, reverse=True):
+            if home_rel == old or home_rel.startswith(old + "/"):
+                return self.xdg_map[old] + home_rel[len(old):]
+        return os.path.join(self.home, *rest) if rest else self.home
+
+
+def destination_for(rel: str, item: RestoreItem, target: str, folder: str,
+                    meta: Optional[Dict[str, Any]] = None,
+                    remaps: Optional[Dict[str, str]] = None) -> Optional[str]:
+    """Where ``rel`` (one of ``item.rels``) goes on this computer."""
+    return Destinations(target, folder, meta, remaps).for_rel(rel)
 
 
 def _generic_item(rel: str, prefix: str, entry: os.DirEntry) -> RestoreItem:
@@ -183,24 +282,6 @@ def _generic_item(rel: str, prefix: str, entry: os.DirEntry) -> RestoreItem:
     )
 
 
-def destination_for(rel: str, item: RestoreItem, target: str, folder: str,
-                    xdg_now: Optional[Dict[str, str]] = None) -> Optional[str]:
-    """Where ``rel`` (one of ``item.rels``) goes on this computer."""
-    parts = rel.split(os.sep)
-    top, rest = parts[0], parts[1:]
-    if top == HOME_DIR:
-        if target == TARGET_FOLDER:
-            return os.path.join(folder, *rest) if rest else folder
-        if item.xdg_key and xdg_now and item.xdg_key in xdg_now and len(rest) == 1:
-            return xdg_now[item.xdg_key]
-        return os.path.join(paths.home(), *rest) if rest else paths.home()
-    if top == OTHER_DIR:
-        if target == TARGET_FOLDER:
-            return os.path.join(folder, *rest) if rest else folder
-        return os.sep + os.path.join(*rest) if rest else None
-    return None
-
-
 class RestoreEngine:
     def __init__(
         self,
@@ -212,6 +293,10 @@ class RestoreEngine:
         conflict: str = CONFLICT_REPLACE,
         apply_settings: bool = True,
         dconf_load: Optional[Callable[[str], Optional[str]]] = None,
+        dconf_dump: Optional[Callable[[str], Optional[str]]] = None,
+        meta: Optional[Dict[str, Any]] = None,
+        remaps: Optional[Dict[str, variants.Remap]] = None,
+        here_desktop: Optional[str] = None,
         callbacks: Optional[Callbacks] = None,
         cancel_event: Optional[threading.Event] = None,
         now: Optional[Callable[[], _dt.datetime]] = None,
@@ -223,6 +308,14 @@ class RestoreEngine:
         self.conflict = conflict
         self.apply_settings = apply_settings
         self.dconf_load = dconf_load
+        self.dconf_dump = dconf_dump
+        self.meta = meta or {}
+        # Only remaps without warnings are applied (see variants.plan_remaps).
+        self.remaps = {rel: r for rel, r in (remaps or {}).items() if not r.warnings}
+        self.here_desktop = here_desktop
+        self.old_home = str(self.meta.get("pasta_pessoal") or "")
+        self.settings_applied = False
+        self._restored_settings: List[str] = []
         self.cb = callbacks or Callbacks()
         self.cancel_event = cancel_event or threading.Event()
         self._now = now or _dt.datetime.now
@@ -238,7 +331,8 @@ class RestoreEngine:
         self._last_emit = 0.0
         self._speed_t0 = 0.0
         self._speed_b0 = 0
-        self._xdg = paths.xdg_user_dirs()
+        self._dest = Destinations(target, folder, self.meta,
+                                  {rel: r.destination for rel, r in self.remaps.items()}, items)
         self.tolerance_ns = 2_000_000_000
 
     # ----------------------------------------------------------------- helpers
@@ -304,7 +398,9 @@ class RestoreEngine:
                 self.stats = plan
             self._set_phase(PHASE_FINISH, "A concluir…")
             self._apply_desktop_settings()
-            changed = self.stats.files_to_copy or self.stats.links
+            if self.target == TARGET_ORIGINAL:
+                self._after_restore_notes()
+            changed = self.stats.files_to_copy or self.stats.links or self.settings_applied
             if not changed and not self.issues:
                 status = STATUS_NOTHING
                 message = "Os ficheiros já estavam todos no sítio. Nada foi alterado."
@@ -325,6 +421,8 @@ class RestoreEngine:
     def _message(self) -> str:
         s = self.stats
         n = s.files_to_copy
+        if not n and not s.links and self.settings_applied:
+            return "As definições do ambiente de trabalho foram aplicadas."
         parts = ["{} {} ({})".format(fmt.files(n), fmt.agree(n, "restaurado", "restaurados"),
                                      fmt.size(s.bytes_copied))]
         if s.kept_existing:
@@ -348,12 +446,12 @@ class RestoreEngine:
 
     def _pass(self) -> None:
         for item in self.items:
-            if item.is_settings_export:
-                continue
             for rel in item.rels:
+                if rel.split(os.sep)[0] not in (HOME_DIR, OTHER_DIR):
+                    continue  # generated files (Extras) are applied or shown, never copied
                 self._check_cancel()
                 src = os.path.join(self.tree_root, rel)
-                dst = destination_for(rel, item, self.target, self.folder, self._xdg)
+                dst = self._dest.for_rel(rel)
                 if dst is None:
                     continue
                 if item.kind == "loose":
@@ -562,6 +660,10 @@ class RestoreEngine:
             self.stats.replaced_files += 1
         self.stats.bytes_copied += est.st_size
         self.progress.files_done += 1
+        home_rel = paths.home_relative(dpath)
+        if home_rel and len(self._restored_settings) < 500 and any(
+                fnmatch.fnmatchcase(home_rel, pattern) for pattern in postrestore.SETTINGS_FILES):
+            self._restored_settings.append(home_rel)
         self._emit()
 
     def _restore_link(self, spath: str, dpath: str, est: os.stat_result) -> None:
@@ -570,6 +672,9 @@ class RestoreEngine:
         except OSError as exc:
             self._issue(spath, "Não foi possível ler a ligação: " + fileops.describe_error(exc), "error")
             return
+        if self.target == TARGET_ORIGINAL:
+            # A link into the old home folder (/home/ana/...) follows the new one.
+            target = postrestore.relink(target, self.old_home, paths.home())
         d_st = _lstat(dpath)
         if d_st is not None and stat.S_ISLNK(d_st.st_mode):
             try:
@@ -596,21 +701,120 @@ class RestoreEngine:
         self.stats.links += 1
 
     def _apply_desktop_settings(self) -> None:
-        if not self.apply_settings or self.dconf_load is None:
+        if not self.apply_settings or self.dconf_load is None or self.target != TARGET_ORIGINAL:
             return
+        here = self.here_desktop
+        if here is None:
+            here = desktop.current_desktop(processes=system.running_process_names())
+        pairs = desktop.path_pairs(self.old_home, paths.home(), old_xdg_dirs(self.meta),
+                                   paths.xdg_user_dirs(existing_only=False))
         for item in self.items:
-            if not item.is_settings_export:
-                continue
-            for rel in item.rels:
+            for rel in item.settings_exports:
+                self._check_cancel()
                 source = os.path.join(self.tree_root, rel)
-                if not os.path.isfile(source):
+                try:
+                    with open(source, encoding="utf-8", errors="surrogateescape") as fh:
+                        text = fh.read()
+                except OSError as exc:
+                    self._issue(source, "Não foi possível ler: " + fileops.describe_error(exc), "error")
                     continue
-                error = self.dconf_load(source)
+                plan = desktop.DesktopPlan(text, str(self.meta.get("ambiente") or ""), here,
+                                           paths.home(), pairs)
+                if not plan.text.strip():
+                    self.notes.extend(plan.notes())
+                    continue
+                try:
+                    os.makedirs(self.replaced_dir, exist_ok=True)
+                except OSError as exc:
+                    self._issue(self.replaced_dir, fileops.describe_error(exc), "error")
+                    continue
+                if self.dconf_dump is not None:
+                    # Rule: what is replaced is kept. The current settings go aside first.
+                    before = os.path.join(self.replaced_dir, "definicoes-antes-do-restauro.ini")
+                    error = self.dconf_dump(before)
+                    if error:
+                        self._issue(before, "As definições não foram aplicadas porque não foi "
+                                    "possível guardar as que estão em uso: " + error, "error")
+                        continue
+                    self._replaced_used = True
+                applied = os.path.join(self.replaced_dir, "definicoes-aplicadas.ini")
+                try:
+                    with open(applied, "w", encoding="utf-8", errors="surrogateescape") as fh:
+                        fh.write(plan.text)
+                except OSError as exc:
+                    self._issue(applied, fileops.describe_error(exc), "error")
+                    continue
+                self._replaced_used = True
+                error = self.dconf_load(applied)
                 if error:
                     self._issue(source, "Não foi possível aplicar as definições: " + error, "error")
-                else:
-                    self.notes.append("As definições do ambiente de trabalho foram aplicadas. "
-                                      "Termina a sessão e volta a entrar para ver tudo como estava.")
+                    continue
+                self.settings_applied = True
+                self.notes.extend(plan.notes())
+                self.notes.append("As definições do ambiente de trabalho foram aplicadas. "
+                                  "Termina a sessão e volta a entrar para ver tudo como estava.")
+
+    def _after_restore_notes(self) -> None:
+        """Things the user should know or do after restoring on this computer."""
+        home = paths.home()
+        keys = {i.key for i in self.items if i.kind == "preset"}
+        for remap in self.remaps_detail():
+            self.notes.append("O {} foi restaurado para a versão instalada aqui ({}): ~/{}.".format(
+                remap.app.capitalize(), variants.KIND_LABELS.get(remap.target, remap.target),
+                remap.destination))
+        if "shell" in keys:
+            for file, number, _line, problem in postrestore.shell_findings(home, self.old_home)[:8]:
+                self.notes.append("{}, linha {}: {}.".format(file, number, problem))
+        mentions = postrestore.old_home_mentions(home, self.old_home, self._restored_settings)
+        if mentions:
+            shown = ", ".join("~/" + m for m in mentions[:8])
+            self.notes.append("Estes ficheiros ainda mencionam a pasta pessoal antiga ({}): {}. "
+                              "Corrige esses caminhos se alguma coisa não funcionar.".format(
+                                  self.old_home, shown))
+        probe = variants.Probe(home)
+        for app, label in (("firefox", "Firefox"), ("thunderbird", "Thunderbird")):
+            if app not in keys:
+                continue
+            kinds = variants.installed_kinds(app, probe)
+            if not kinds:
+                continue
+            installed = variants.installed_mozilla_version(app, kinds[0], probe)
+            for base in self._mozilla_bases(app):
+                for profile in variants.default_profiles(base):
+                    warning = variants.downgrade_warning(label, installed,
+                                                         variants.profile_last_version(profile))
+                    if warning and warning not in self.notes:
+                        self.notes.append(warning)
+        here = self.here_desktop
+        if here is None:
+            here = desktop.current_desktop(processes=system.running_process_names())
+        if "keyrings" in keys:
+            self.notes.append("Se a palavra-passe com que entras no computador for diferente da "
+                              "antiga, o sistema vai pedir a antiga para abrir o porta-chaves. "
+                              "Depois podes mudá-la na app «Palavras-passe e chaves».")
+        if here == desktop.KDE and keys & {"chrome", "chromium", "brave", "edge", "vivaldi", "opera",
+                                           "vscode", "cursor", "windsurf"}:
+            self.notes.append("No KDE, os navegadores e editores procuram as palavras-passe na "
+                              "carteira do KDE. Para verem as que guardaste antes, instala o "
+                              "gnome-keyring e abre-os com a opção --password-store=gnome-libsecret.")
+        if any(r.app == "chromium" and r.target == variants.SNAP for r in self.remaps_detail()):
+            self.notes.append("Para o Chromium (snap) ler as palavras-passe guardadas, corre no "
+                              "terminal: sudo snap connect chromium:password-manager-service")
+
+    def remaps_detail(self) -> List[variants.Remap]:
+        return list(self.remaps.values())
+
+    def _mozilla_bases(self, app: str) -> List[str]:
+        bases = []
+        for item in self.items:
+            if item.key != app:
+                continue
+            for rel in item.rels:
+                dest = self._dest.for_rel(rel)
+                if not dest:
+                    continue
+                bases.append(os.path.join(dest, "firefox") if app == "firefox" else dest)
+        return [b for b in bases if os.path.isdir(b)]
 
 
 def _entry_message(exc: BaseException) -> str:

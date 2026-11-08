@@ -134,7 +134,7 @@ def days_since(moment: Optional[_dt.datetime], now: Optional[_dt.datetime] = Non
 
 
 def parse_iso(text: Optional[str]) -> Optional[_dt.datetime]:
-    if not text:
+    if not text or not isinstance(text, str):
         return None
     try:
         return _dt.datetime.strptime(text[:19], "%Y-%m-%dT%H:%M:%S")
@@ -152,6 +152,8 @@ def stamp(moment: _dt.datetime) -> str:
 
 
 def parse_stamp(text: str) -> Optional[_dt.datetime]:
+    if not isinstance(text, str):
+        return None
     try:
         return _dt.datetime.strptime(text[:19], "%Y-%m-%d_%H-%M-%S")
     except ValueError:

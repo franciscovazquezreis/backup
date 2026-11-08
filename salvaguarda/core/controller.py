@@ -5,9 +5,10 @@ from __future__ import annotations
 import os
 import threading
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Dict, List, Optional
 
-from . import fsinfo, paths, portable, report, selection, system
+from .. import VERSION
+from . import desktop, fmt, fsinfo, inventory, paths, portable, report, selection, system
 from .config import Config, Destination
 from .engine import BackupEngine, Callbacks, RunResult, STATUS_FAILED, STATUS_CANCELLED
 from .exclusions import Exclusions, validate_custom
@@ -71,18 +72,37 @@ def layout_for(config: Config, root: str) -> DiskLayout:
     return DiskLayout(root, config.computer_name)
 
 
+def environment_meta(config: Config) -> Dict[str, object]:
+    """What the computer metadata records about the system the copy comes from."""
+    meta: Dict[str, object] = {
+        "sistema": system.os_pretty_name(),
+        "distribuicao": system.os_release(),
+        "utilizador": system.user_name(),
+        "uid": os.getuid(),
+        "pasta_pessoal": paths.home(),
+        "pastas_xdg": {k: paths.to_portable(v) for k, v in paths.xdg_user_dirs().items()},
+        "configuracao": config.snapshot(),
+        "versao_app": VERSION,
+    }
+    here = desktop.current_desktop(processes=system.running_process_names())
+    if here:  # never replace a known desktop with "" (command line without a session)
+        meta["ambiente"] = here
+    return meta
+
+
 def build_engine(config: Config, root: str, callbacks: Callbacks,
                  cancel_event: threading.Event) -> BackupEngine:
     resolution = selection.resolve(config)
-    meta_extra = {
-        "sistema": system.os_pretty_name(),
-        "utilizador": os.environ.get("USER", ""),
-        "pasta_pessoal": paths.home(),
-        "configuracao": config.snapshot(),
-    }
-    from .. import VERSION
+    meta_extra = environment_meta(config)
+    project_roots = [s.path for s in resolution.sources if s.kind == "project"]
 
-    meta_extra["versao_app"] = VERSION
+    def inventory_dump(target: str) -> Optional[str]:
+        return inventory.generate(
+            target, computer=config.computer_name, system=str(meta_extra["sistema"]),
+            desktop=desktop.label(str(meta_extra.get("ambiente", ""))) if meta_extra.get("ambiente") else "",
+            user=str(meta_extra["utilizador"]), home=paths.home(), version=VERSION,
+            xdg=paths.xdg_user_dirs(), project_roots=project_roots)
+
     return BackupEngine(
         layout_for(config, root), resolution, make_exclusions(config),
         keep_versions_days=config.settings.keep_versions_days,
@@ -90,6 +110,7 @@ def build_engine(config: Config, root: str, callbacks: Callbacks,
         warn_open_apps=config.settings.warn_open_apps,
         running_processes=system.running_process_names,
         dconf_dump=system.dconf_dump,
+        inventory_dump=inventory_dump,
         meta_extra=meta_extra,
         callbacks=callbacks,
         cancel_event=cancel_event,
@@ -114,8 +135,6 @@ def after_backup(config: Config, dest: Destination, root: str, result: RunResult
 def last_success(config: Config, root: str):
     layout = layout_for(config, root)
     status = layout.read_status()
-    from . import fmt
-
     return fmt.parse_iso(status.get("ultima_copia_concluida")), status
 
 

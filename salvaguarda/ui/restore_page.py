@@ -11,7 +11,8 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import GLib, Gtk, Pango  # noqa: E402
 
-from ..core import catalog, fileops, fmt, paths, report, restore, system  # noqa: E402
+from ..core import (catalog, desktop, fileops, fmt, paths, report, restore,  # noqa: E402
+                    system, variants)
 from ..core.engine import STATUS_FAILED, STATUS_NOTHING, STATUS_OK, STATUS_WARNINGS  # noqa: E402
 from ..core.layout import (ComputerBackup, DiskLayout, VersionRun, list_computers,  # noqa: E402
                            list_version_runs, read_disk_marker, ROOT_DIR_NAME)
@@ -42,6 +43,9 @@ class RestorePage(Gtk.Stack):
         self.root: Optional[str] = None
         self.runs: List[VersionRun] = []
         self.items: List[restore.RestoreItem] = []
+        self.meta: Dict[str, object] = {}
+        self.variant_plan: Dict[str, variants.Remap] = {}
+        self.inventory_paths: List[str] = []
         self.checks: Dict[int, Gtk.CheckButton] = {}
         self._size_cancel = threading.Event()
 
@@ -217,7 +221,12 @@ class RestorePage(Gtk.Stack):
         self.settings_check = Gtk.CheckButton.new_with_label(
             "Aplicar também as definições do ambiente de trabalho (painel, atalhos, aparência)")
         self.settings_check.set_active(True)
+        self.settings_check.set_no_show_all(True)
         box.pack_start(self.settings_check, False, False, 0)
+        self.settings_hint = common.label("", ("sg-dim", "sg-small"), wrap=True, max_chars=70)
+        self.settings_hint.set_no_show_all(True)
+        self.settings_hint.set_margin_start(26)
+        box.pack_start(self.settings_hint, False, False, 0)
 
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         browse = Gtk.Button.new_with_mnemonic("Abrir no _gestor de ficheiros")
@@ -244,8 +253,22 @@ class RestorePage(Gtk.Stack):
         self._size_cancel.set()
         self._size_cancel = threading.Event()
         tree = self._tree()
-        self.items = restore.items_for_tree(tree, self.computer.layout.read_meta())
+        self.meta = self.computer.layout.read_meta()
+        found = restore.items_for_tree(tree, self.meta)
+        self.inventory_paths = [os.path.join(tree, rel) for item in found if item.is_inventory
+                                for rel in item.exports if os.path.isfile(os.path.join(tree, rel))]
+        self.items = [item for item in found if not item.is_inventory]
+        self.variant_plan = restore.plan_variants(self.items)
         self.checks = {}
+        if self.inventory_paths:
+            inventory = Gtk.Button.new_with_mnemonic("Ver a _lista de programas que estavam instalados")
+            inventory.set_relief(Gtk.ReliefStyle.NONE)
+            inventory.set_halign(Gtk.Align.START)
+            inventory.set_tooltip_text("Para voltares a instalar os teus programas, por exemplo "
+                                       "noutra distribuição. Nada é instalado automaticamente.")
+            path = self.inventory_paths[0]
+            inventory.connect("clicked", lambda *_: common.open_path(path))
+            self.items_section.pack_start(inventory, False, False, 0)
         if not self.items:
             self.items_section.pack_start(common.label("Esta cópia está vazia.", ("sg-dim",)), False, False, 4)
             self.items_section.show_all()
@@ -268,8 +291,19 @@ class RestorePage(Gtk.Stack):
             size.set_width_chars(9)
             suffix = common.hbox(10, size, check)
             subtitle = paths.safe_text(item.where) if item.where else None
-            if item.is_settings_export:
+            if item.is_settings_export and not item.rels:
                 subtitle = "Painel, atalhos de teclado, aparência e applets"
+            for rel in item.rels:
+                remap = self.variant_plan.get(rel)
+                if remap is None:
+                    continue
+                if remap.warnings:
+                    subtitle = remap.warnings[0]
+                else:
+                    subtitle = "Vai para o {} ({}): ~/{}".format(
+                        item.label, variants.KIND_LABELS.get(remap.target, remap.target),
+                        remap.destination)
+                break
             lrow = common.row(item.label, subtitle, item.icon, suffix, activatable=True)
             lrow.check = check  # type: ignore[attr-defined]
             listbox.add(lrow)
@@ -277,7 +311,17 @@ class RestorePage(Gtk.Stack):
         listbox.connect("row-activated", lambda lb, r: r.check.set_active(not r.check.get_active()))
         self.items_section.pack_start(listbox, False, False, 6)
         self.items_section.show_all()
-        self.settings_check.set_visible(any(i.is_settings_export for i in self.items))
+        has_settings = any(i.is_settings_export for i in self.items)
+        self.settings_check.set_visible(has_settings)
+        source = str(self.meta.get("ambiente") or "")
+        here = desktop.current_desktop(processes=system.running_process_names())
+        if has_settings and source and here and source != here:
+            self.settings_hint.set_text(
+                "A cópia foi feita no {} e este computador usa {}: só são aplicadas as "
+                "definições das apps.".format(desktop.label(source), desktop.label(here)))
+            self.settings_hint.show()
+        else:
+            self.settings_hint.hide()
         self._measure(tree, size_labels)
         self._update_button()
 
@@ -381,6 +425,34 @@ class RestorePage(Gtk.Stack):
                 if answer != "continue":
                     return
 
+        meta = dict(self.meta)
+        old_user = str(meta.get("utilizador") or "")
+        if target == restore.TARGET_ORIGINAL and old_user and old_user != system.user_name():
+            answer = common.choose(
+                self.window, "O nome de utilizador mudou",
+                "As cópias foram feitas pelo utilizador «{}» e agora estás a usar «{}». Os "
+                "ficheiros voltam para a tua pasta pessoal, mas alguns programas guardam "
+                "caminhos com o nome antigo (por exemplo, o histórico de projetos do Claude "
+                "Code). No fim, a lista do que convém rever aparece nas notas.".format(
+                    old_user, system.user_name()),
+                [("cancel", "Cancelar"), ("continue", "Continuar")], kind=Gtk.MessageType.INFO)
+            if answer != "continue":
+                return
+        remaps = {}
+        if target == restore.TARGET_ORIGINAL:
+            selected_rels = {rel for item in items for rel in item.rels}
+            remaps = {rel: r for rel, r in self.variant_plan.items() if rel in selected_rels}
+            warnings = [w for r in remaps.values() for w in r.warnings]
+            if warnings:
+                answer = common.choose(
+                    self.window, "Alguns perfis não vão para a app instalada",
+                    "Vão para o sítio de onde vieram. Se preferires, cancela, faz o que está "
+                    "indicado e volta a restaurar.",
+                    [("cancel", "Cancelar"), ("continue", "Continuar")], details=warnings,
+                    kind=Gtk.MessageType.WARNING)
+                if answer != "continue":
+                    return
+
         tree = self._tree()
         apply_settings = self.settings_check.get_active() and self.settings_check.get_visible()
         self._job = (tree, target, comp)
@@ -390,6 +462,7 @@ class RestorePage(Gtk.Stack):
         self.runner.start(lambda cb, cancel: restore.RestoreEngine(
             tree, items, target=target, folder=folder, conflict=conflict,
             apply_settings=apply_settings, dconf_load=system.dconf_load,
+            dconf_dump=system.dconf_dump, meta=meta, remaps=remaps,
             callbacks=cb, cancel_event=cancel))
 
     def _confirm_cancel(self) -> None:

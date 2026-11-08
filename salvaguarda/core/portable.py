@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import datetime as _dt
 import os
+import re
 import shutil
 import stat
+from typing import Tuple
 
 from .. import VERSION
 from . import fmt
@@ -46,8 +48,11 @@ COMO ESTÁ ORGANIZADO
     Pastas de fora da pasta pessoal, com o caminho completo (ex.: media/dados/Fotos).
 
 <computador>/Cópia atual/Extras/
-    Definições do ambiente de trabalho (painel, atalhos, aparência), exportadas com
-    o comando "dconf dump /".
+    definicoes-do-ambiente-de-trabalho.ini: definições do ambiente de trabalho
+    (painel, atalhos, aparência), exportadas com o comando "dconf dump /".
+    programas-instalados.md: os programas que tinhas instalados (pacotes, snaps,
+    Flatpaks, ferramentas de programação, modelos de IA, extensões dos editores) e
+    os comandos para os voltares a instalar.
 
 <computador>/Versões anteriores/<data>/
     Ficheiros que foram apagados ou substituídos no computador nessa data.
@@ -82,11 +87,28 @@ pessoal. No terminal, para manter datas e permissões:
 
     cp -a "<caminho deste disco>/Salvaguarda/<computador>/Cópia atual/Pasta pessoal/." ~/
 
-Para aplicar as definições do ambiente de trabalho (Cinnamon, GNOME, MATE):
+Para aplicar as definições do ambiente de trabalho, só no mesmo ambiente em que
+foram guardadas (por exemplo, Cinnamon para Cinnamon):
 
     dconf load / < "<...>/Cópia atual/Extras/definicoes-do-ambiente-de-trabalho.ini"
 
-Depois, termina a sessão e volta a entrar.
+Depois, termina a sessão e volta a entrar. A app faz isto com mais cuidado: guarda
+primeiro as definições em uso e, noutro ambiente, aplica só as das apps.
+
+
+SE MUDARES DE DISTRIBUIÇÃO
+--------------------------
+
+* Ao instalar o sistema novo, usa o mesmo nome de utilizador e a mesma palavra-passe:
+  o porta-chaves abre sozinho e os caminhos guardados nas definições continuam
+  válidos (por exemplo, o histórico de projetos do Claude Code).
+* Restaura com a app: o Firefox, o Thunderbird, o Chromium, o VS Code e o
+  LibreOffice vão para a versão instalada no sistema novo (.deb, snap ou Flatpak),
+  que guarda os dados noutra pasta.
+* Os programas não são copiados. Reinstala-os com a lista em
+  Extras/programas-instalados.md.
+* Os volumes do Docker e os modelos do Ollama ou do LM Studio também não são
+  copiados: a lista diz quais eram e como os voltar a obter.
 
 
 SE O TEU UTILIZADOR NÃO CONSEGUIR LER ALGUNS FICHEIROS
@@ -114,7 +136,11 @@ def write_readme(root: str) -> None:
         # Only the generation line changes between runs of the same version.
         if current.split("Gerado pela")[0] == text.split("Gerado pela")[0]:
             return
-    except OSError:
+        # Written by a newer version (another computer, or after a downgrade): keep it.
+        match = re.search(r"Gerado pela Salvaguarda (\S+) em", current)
+        if match and version_key(match.group(1)) > version_key(VERSION):
+            return
+    except (OSError, UnicodeError):
         pass
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
@@ -126,33 +152,74 @@ def package_dir() -> str:
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+_VERSION_LINE = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']', re.M)
+# Files that dpkg leaves next to the real ones while it is installing an update.
+_TRANSIENT = (".pyc", ".pyo", ".dpkg-new", ".dpkg-tmp", ".dpkg-old", ".dpkg-dist")
+
+
+def source_version(pkg_dir: str) -> str:
+    """VERSION written in ``<pkg_dir>/__init__.py`` (the files, not the running code)."""
+    try:
+        with open(os.path.join(pkg_dir, "__init__.py"), encoding="utf-8") as fh:
+            match = _VERSION_LINE.search(fh.read())
+    except (OSError, UnicodeError):
+        return ""
+    return match.group(1).strip() if match else ""
+
+
+def version_key(text: str) -> Tuple[Tuple[int, ...], int, str]:
+    """Order versions like dpkg does for X.Y.Z and X.Y.Z~rcN; garbage sorts first."""
+    text = (text or "").strip()
+    main, tilde, suffix = text.partition("~")
+    try:
+        numbers = tuple(int(part) for part in main.split("."))
+    except ValueError:
+        return ((), 0, "")
+    return (numbers, 0 if tilde else 1, suffix)
+
+
 def _ignore(folder: str, names):
-    return [n for n in names if n == "__pycache__" or n.endswith((".pyc", ".pyo"))]
+    return [n for n in names if n == "__pycache__" or n.endswith(_TRANSIENT)]
 
 
 def copy_app(root: str) -> bool:
-    """Put a runnable copy of the app on the disk. Returns True when it was updated."""
+    """Put a runnable copy of the app on the disk. Returns True when it was updated.
+
+    Never replaces a newer copy (a disk shared with a computer that has a newer
+    version, or after installing an older .deb), and never copies files that are
+    not the running version (the .deb was updated while the app was open).
+    """
     target = os.path.join(root, APP_DIR)
     version_file = os.path.join(target, "VERSAO")
+    source = package_dir()
+    if source_version(source) != VERSION:
+        return False  # the next run, with the new version, makes the copy
     try:
         with open(version_file, encoding="utf-8") as fh:
-            if fh.read().strip() == VERSION:
-                return False
-    except OSError:
-        pass
+            on_disk = fh.read().strip()
+    except (OSError, UnicodeError):
+        on_disk = ""
+    if on_disk and version_key(on_disk) >= version_key(VERSION):
+        return False
     staging = target + ".nova"
     old = target + ".antiga"
     for leftover in (staging, old):
         if os.path.lexists(leftover):
             shutil.rmtree(leftover, ignore_errors=True)
     os.makedirs(staging)
-    shutil.copytree(package_dir(), os.path.join(staging, "salvaguarda"), ignore=_ignore)
-    launcher = os.path.join(staging, LAUNCHER_NAME)
-    with open(launcher, "w", encoding="utf-8") as fh:
-        fh.write(_LAUNCHER)
-    os.chmod(launcher, os.stat(launcher).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    with open(os.path.join(staging, "VERSAO"), "w", encoding="utf-8") as fh:
-        fh.write(VERSION + "\n")
+    try:
+        shutil.copytree(source, os.path.join(staging, "salvaguarda"), ignore=_ignore)
+        if source_version(os.path.join(staging, "salvaguarda")) != VERSION:
+            raise OSError("a app foi atualizada durante a cópia")
+        launcher = os.path.join(staging, LAUNCHER_NAME)
+        with open(launcher, "w", encoding="utf-8") as fh:
+            fh.write(_LAUNCHER)
+        os.chmod(launcher, os.stat(launcher).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        with open(os.path.join(staging, "VERSAO"), "w", encoding="utf-8") as fh:
+            fh.write(VERSION + "\n")
+    except OSError:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
     if os.path.lexists(target):
         os.rename(target, old)
     os.rename(staging, target)

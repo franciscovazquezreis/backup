@@ -17,15 +17,27 @@ voltarem ao sítio certo depois de formatares o computador.
   faltar espaço.
 - **Sabe onde as apps guardam as coisas.** Marcadores e palavras-passe do Firefox, Chrome,
   Brave e afins, e-mail do Thunderbird, chaves SSH e GPG, porta-chaves do sistema, Git,
-  VS Code, Cursor, Windsurf, assistentes de IA (Claude Code, Codex, Gemini CLI...), terminal,
-  LibreOffice e as definições do próprio ambiente de trabalho (painel, atalhos, aparência).
-  Só aparecem as que existirem no computador.
-- **Pensada para projetos de programação.** Copia o código, os repositórios `.git` e os
-  ficheiros `.env`, e deixa de fora `node_modules`, ambientes virtuais Python, `__pycache__`
-  e outras pastas que um `npm install` ou `pip install` volta a criar.
+  terminal, LibreOffice e as definições do próprio ambiente de trabalho (painel, atalhos,
+  aparência). Só aparecem as que existirem no computador.
+- **Pensada para vibe coding.** Guarda as definições, regras, skills, servidores MCP, chaves e
+  conversas dos assistentes de IA (Claude Code, Codex, Gemini, Copilot, Qwen, Continue,
+  OpenCode, Cline, Roo, Goose, Aider...), dos editores (VS Code, Cursor, Windsurf, Kiro, Zed,
+  Trae, Void, JetBrains), da app do Claude, do Ollama e do LM Studio (sem os modelos), do
+  Jupyter, do n8n, das contas de nuvem e publicação (Vercel, Netlify, Supabase, Cloudflare,
+  Firebase, AWS, Google Cloud, Azure, Fly.io, Railway, Stripe, ngrok) e dos gestores de
+  pacotes e de versões.
+- **Projetos de programação.** Copia o código, os repositórios `.git` e os ficheiros `.env`, e
+  deixa de fora `node_modules`, ambientes virtuais Python, `__pycache__` e outras pastas que um
+  `npm install` ou `pip install` volta a criar.
+- **Lista de programas instalados.** Em cada cópia fica no disco uma lista do que tinhas
+  instalado (pacotes de repositórios extra, snaps, Flatpaks, pacotes globais do npm, ferramentas
+  do pipx e do uv, programas do Cargo e do Go, AppImages, modelos do Ollama, extensões dos
+  editores, volumes do Docker, tarefas agendadas e as dependências dos ambientes Python dos
+  projetos), com os comandos para os voltares a instalar.
 - **Restauro guiado.** Depois de formatar, a app reconhece o disco, propõe restaurar e devolve
-  cada ficheiro ao sítio, mesmo que o teu utilizador tenha agora outro nome ou que o sistema
-  esteja noutro idioma (a pasta «Documentos» vai para «Documents», por exemplo).
+  cada ficheiro ao sítio, mesmo que o teu utilizador tenha agora outro nome, que o sistema
+  esteja noutro idioma (a pasta «Documentos» vai para «Documents», por exemplo) ou que tenhas
+  mudado de distribuição (ver abaixo).
 - **Leva-se a si própria.** Cada cópia guarda também a app e um `LEIA-ME.txt` no disco, para
   poderes restaurar sem instalar nada e sem internet.
 - **Protege-te de surpresas.** Se uma pasta desaparecer ou não puder ser lida, a cópia
@@ -38,14 +50,26 @@ voltarem ao sítio certo depois de formatares o computador.
 
 ## Instalar
 
-1. Descarrega o ficheiro [`dist/salvaguarda_1.0.0_all.deb`](dist/salvaguarda_1.0.0_all.deb).
+1. Descarrega o ficheiro [`dist/salvaguarda_1.1.0_all.deb`](dist/salvaguarda_1.1.0_all.deb).
 2. Faz duplo clique no ficheiro e escolhe «Instalar pacote». Em alternativa, no terminal:
 
    ```sh
-   sudo apt install ./salvaguarda_1.0.0_all.deb
+   sudo apt install ./salvaguarda_1.1.0_all.deb
    ```
 
 3. Abre a Salvaguarda a partir do menu de aplicações.
+
+### Atualizar para uma versão nova
+
+Instala o `.deb` novo por cima, da mesma forma (duplo clique ou `sudo apt install ./…`). Não é
+preciso desinstalar nada: as tuas escolhas, o histórico e as cópias no disco ficam como
+estavam. Se a app estiver aberta durante a atualização, volta a abri-la e ela propõe reiniciar
+na versão nova. Na primeira cópia depois de atualizar, se a versão nova deixar de copiar alguma
+coisa (por exemplo, uma pasta de cache que passou a ser excluída), a app pergunta antes; o que
+sair da «Cópia atual» fica em «Versões anteriores».
+
+As versões anteriores do `.deb` ficam na pasta `dist/`, para poderes voltar atrás se for
+preciso. Instalar uma versão mais antiga por cima também não apaga nada.
 
 Não precisa de internet: a app usa apenas o Python 3 e o GTK 3, que já vêm instalados no
 Linux Mint e no Ubuntu e, em geral, nos ambientes gráficos baseados em GTK (Cinnamon, GNOME,
@@ -87,6 +111,28 @@ Com a app (recomendado):
 
 A partir daí, as cópias continuam na mesma pasta do disco, como antes.
 
+## Mudar de distribuição
+
+As cópias servem para qualquer distribuição baseada em Debian (Ubuntu, Debian, Pop!_OS, Zorin,
+elementary, MX, Kubuntu, uma versão nova do Mint...). Alguns cuidados que a app já trata e
+outros que dependem de ti:
+
+- **Usa o mesmo nome de utilizador e a mesma palavra-passe** no sistema novo. O porta-chaves
+  (onde o navegador, o VS Code e outras apps guardam palavras-passe e sessões) abre sozinho, e
+  os caminhos guardados nas definições continuam válidos. Se mudares de nome, a app restaura na
+  mesma, ajusta as ligações simbólicas e lista no fim os ficheiros que ainda apontam para a
+  pasta antiga.
+- **A mesma app, outro formato.** No Ubuntu o Firefox é um snap e guarda o perfil noutra pasta;
+  noutras distribuições pode ser Flatpak. Ao restaurar, o Firefox, o Thunderbird, o Chromium, o
+  Brave, o VS Code e o LibreOffice vão para a versão instalada no sistema novo. Instala-os (e
+  abre-os uma vez) antes de restaurar.
+- **Definições do ambiente de trabalho.** Antes de as aplicar, a app guarda as que estão em uso.
+  Se o ambiente for outro (Cinnamon para GNOME ou KDE, por exemplo), só aplica as definições das
+  apps, para não estragar o painel nem o tema.
+- **Programas.** Não são copiados: reinstala-os com a lista em `Extras/programas-instalados.md`
+  (abre-a no separador «Restaurar»). Os volumes do Docker e os modelos do Ollama também não
+  estão na cópia; a lista diz quais eram e como os exportar ou voltar a descarregar.
+
 Sem a app, os ficheiros estão no disco como qualquer outra pasta. No terminal, para manter
 datas e permissões:
 
@@ -105,7 +151,7 @@ Salvaguarda/
     ├── Cópia atual/
     │   ├── Pasta pessoal/       espelho do que escolheste em /home/<utilizador>
     │   ├── Outras localizações/ pastas de fora da pasta pessoal, com o caminho completo
-    │   └── Extras/              definições do ambiente de trabalho (dconf)
+    │   └── Extras/              definições do ambiente de trabalho e lista de programas
     ├── Versões anteriores/
     │   └── 2026-10-16_15-30-12/ o que foi apagado ou substituído nessa cópia
     └── Registos/                relatório de cada cópia
@@ -149,7 +195,12 @@ comando `salvaguarda --copiar`.
   (algumas imagens de máquinas virtuais) passam a ocupar o tamanho total.
 - Bases de dados abertas (navegador, e-mail) podem ficar incoerentes se as apps estiverem
   abertas durante a cópia; a app avisa antes de começar.
-- Não guarda a lista de aplicações instaladas.
+- Os programas instalados não são copiados, só a lista deles. Volumes do Docker e bases de dados
+  fora da pasta pessoal (por exemplo, em `/var/lib`) também não; a lista indica como exportá-los.
+- O Claude Code apaga as conversas com mais de 30 dias e o Gemini CLI faz o mesmo. A cópia
+  guarda o que eles apagam em «Versões anteriores» só durante o prazo definido (6 meses por
+  omissão). Para guardar o histórico por mais tempo, aumenta esse prazo nas Definições ou, no
+  Claude Code, acrescenta `"cleanupPeriodDays": 3650` ao `~/.claude/settings.json`.
 
 ## Para quem desenvolve
 

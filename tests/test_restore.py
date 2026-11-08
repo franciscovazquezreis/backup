@@ -180,11 +180,160 @@ class RestoreTests(SandboxTestCase):
         loaded = []
         items = [i for i in self.items() if i.is_settings_export]
         self.assertEqual(len(items), 1)
-        result = restore.RestoreEngine(self.layout.current_dir, items,
+        result = restore.RestoreEngine(self.layout.current_dir, items, here_desktop="cinnamon",
                                        dconf_load=lambda p: loaded.append(read(p))).run()
         self.assertEqual(len(loaded), 1)
         self.assertIn("favorite-apps", loaded[0])
         self.assertTrue(any("sessão" in n for n in result.notes))
+
+
+
+class CrossDistroRestoreTests(SandboxTestCase):
+    """Restoring a copy made on Linux Mint on another system or another user name."""
+
+    def items(self, tree=None):
+        return restore.items_for_tree(tree or self.layout.current_dir, self.layout.read_meta())
+
+    def reinstall(self, user="bruno", english=False):
+        home = os.path.join(self.tmp, "home", user)
+        os.makedirs(os.path.join(home, ".config"))
+        names = ("Documents", "Pictures") if english else ("Documentos", "Imagens")
+        with open(os.path.join(home, ".config", "user-dirs.dirs"), "w") as fh:
+            fh.write('XDG_DOCUMENTS_DIR="$HOME/{}"\nXDG_PICTURES_DIR="$HOME/{}"\n'.format(*names))
+        os.environ["HOME"] = home
+        return home
+
+    def backup_with_meta(self, **kwargs):
+        meta = {"pasta_pessoal": self.home, "utilizador": "ana", "ambiente": "cinnamon",
+                "pastas_xdg": {"DOCUMENTS": "~/Documentos", "PICTURES": "~/Imagens"}}
+        result = self.backup(meta_extra=meta, **kwargs)
+        self.assertIn(result.status, ("ok", "warnings"), result.message)
+        return result
+
+    def test_desktop_preset_restores_its_files_and_applies_only_the_export(self):
+        from unittest import mock
+
+        self.write(".config/gtk-3.0/bookmarks", "file:///home/ana/Documentos", mtime=T0)
+        self.write(".config/mimeapps.list", "[Default Applications]\ntext/html=firefox.desktop\n",
+                   mtime=T0)
+        self.write(".local/share/applications/app.desktop", "[Desktop Entry]\n", mtime=T0)
+        self.config.set_enabled(KIND_PRESET, "desktop", True)
+
+        def fake_dump(target):
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "w") as fh:
+                fh.write("[org/cinnamon]\nfavorite-apps=['firefox.desktop']\n\n"
+                         "[org/x/editor/preferences/editor]\ntabs-size=uint32 4\n")
+
+        with mock.patch("salvaguarda.core.selection._dconf_available", return_value=True):
+            self.backup_with_meta(dconf_dump=fake_dump)
+        new_home = self.reinstall()
+        loaded, saved = [], []
+
+        def fake_save(target):
+            with open(target, "w") as fh:
+                fh.write("[org/cinnamon]\nold=true\n")
+            saved.append(target)
+
+        items = [i for i in self.items() if i.key == "desktop"]
+        self.assertEqual(len(items), 1)
+        result = restore.RestoreEngine(self.layout.current_dir, items, here_desktop="gnome",
+                                       meta=self.layout.read_meta(), dconf_dump=fake_save,
+                                       dconf_load=lambda p: loaded.append(read(p))).run()
+        self.assertEqual(result.status, STATUS_OK, result.message)
+        self.assertTrue(os.path.exists(os.path.join(new_home, ".config/gtk-3.0/bookmarks")))
+        self.assertTrue(os.path.exists(os.path.join(new_home, ".local/share/applications/app.desktop")))
+        self.assertEqual(len(loaded), 1, "only the dconf export is loaded, never mimeapps.list")
+        self.assertIn("tabs-size", loaded[0])
+        self.assertNotIn("favorite-apps", loaded[0], "Cinnamon settings are not applied on GNOME")
+        self.assertEqual(len(saved), 1, "current settings are kept before loading")
+        self.assertTrue(saved[0].startswith(result.replaced_dir))
+        self.assertTrue(any("GNOME" in n for n in result.notes))
+
+    def test_settings_are_not_loaded_when_current_ones_cannot_be_saved(self):
+        from unittest import mock
+
+        self.config.set_enabled(KIND_PRESET, "desktop", True)
+
+        def fake_dump(target):
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "w") as fh:
+                fh.write("[org/x/editor/preferences/editor]\ntabs-size=uint32 4\n")
+
+        with mock.patch("salvaguarda.core.selection._dconf_available", return_value=True):
+            self.backup_with_meta(dconf_dump=fake_dump)
+        self.reinstall()
+        loaded = []
+        items = [i for i in self.items() if i.is_settings_export]
+        result = restore.RestoreEngine(self.layout.current_dir, items, here_desktop="cinnamon",
+                                       dconf_dump=lambda t: "sem dconf",
+                                       dconf_load=lambda p: loaded.append(p)).run()
+        self.assertEqual(loaded, [])
+        self.assertTrue(result.issues)
+
+    def test_absolute_links_follow_the_new_home(self):
+        self.write("Documentos/script.sh", "#!/bin/sh", mtime=T0)
+        os.symlink(os.path.join(self.home, "Documentos", "script.sh"),
+                   os.path.join(self.home, "Documentos", "atalho"))
+        os.symlink("/usr/bin/env", os.path.join(self.home, "Documentos", "sistema"))
+        self.backup_with_meta()
+        new_home = self.reinstall()
+        items = [i for i in self.items() if i.label == "Documentos"]
+        engine = restore.RestoreEngine(self.layout.current_dir, items, meta=self.layout.read_meta())
+        self.assertEqual(engine.run().status, STATUS_OK)
+        self.assertEqual(os.readlink(os.path.join(new_home, "Documentos", "atalho")),
+                         os.path.join(new_home, "Documentos", "script.sh"))
+        self.assertEqual(os.readlink(os.path.join(new_home, "Documentos", "sistema")), "/usr/bin/env")
+        again = restore.RestoreEngine(self.layout.current_dir, items, meta=self.layout.read_meta())
+        self.assertEqual(again.run().status, STATUS_NOTHING)
+
+    def test_project_inside_a_personal_folder_follows_the_new_language(self):
+        project = os.path.join(self.home, "Documentos", "app")
+        self.write("Documentos/app/main.py", "print(1)", mtime=T0)
+        self.config.add_path(KIND_PROJECT, project)
+        self.config.set_enabled("xdg", "DOCUMENTS", False)
+        self.backup_with_meta()
+        new_home = self.reinstall(english=True)
+        items = [i for i in self.items() if i.kind == KIND_PROJECT]
+        restore.RestoreEngine(self.layout.current_dir, items, meta=self.layout.read_meta()).run()
+        self.assertTrue(os.path.exists(os.path.join(new_home, "Documents", "app", "main.py")))
+        self.assertFalse(os.path.exists(os.path.join(new_home, "Documentos")))
+
+    def test_firefox_profile_goes_to_the_snap_installed_here(self):
+        from salvaguarda.core import variants
+
+        self.write(".mozilla/firefox/profiles.ini", "[Profile0]\nPath=a.default\nDefault=1\n", mtime=T0)
+        self.write(".mozilla/firefox/a.default/places.sqlite", "marcadores", mtime=T0)
+        self.config.set_enabled(KIND_PRESET, "firefox", True)
+        self.backup_with_meta()
+        new_home = self.reinstall()
+        fake_root = os.path.join(self.tmp, "root")
+        os.makedirs(os.path.join(fake_root, "snap", "firefox", "current"))
+        items = [i for i in self.items() if i.key == "firefox"]
+        plan = restore.plan_variants(items, variants.Probe(new_home, fake_root))
+        self.assertEqual([r.destination for r in plan.values()], ["snap/firefox/common/.mozilla"])
+        result = restore.RestoreEngine(self.layout.current_dir, items, remaps=plan,
+                                       meta=self.layout.read_meta()).run()
+        self.assertEqual(result.status, STATUS_OK, result.message)
+        self.assertEqual(read(os.path.join(new_home, "snap/firefox/common/.mozilla/firefox/"
+                                           "a.default/places.sqlite")), "marcadores")
+        self.assertFalse(os.path.exists(os.path.join(new_home, ".mozilla")))
+        self.assertTrue(any("snap" in n for n in result.notes))
+
+    def test_folder_target_ignores_remaps_and_settings(self):
+        from salvaguarda.core import variants
+
+        self.write(".mozilla/firefox/a.default/prefs.js", "x", mtime=T0)
+        self.config.set_enabled(KIND_PRESET, "firefox", True)
+        self.backup_with_meta()
+        self.reinstall()
+        target = os.path.join(self.tmp, "ver-primeiro")
+        items = [i for i in self.items() if i.key == "firefox"]
+        remap = variants.Remap("firefox", "Pasta pessoal/.mozilla", "deb", "snap",
+                               "snap/firefox/common/.mozilla")
+        restore.RestoreEngine(self.layout.current_dir, items, target=restore.TARGET_FOLDER,
+                              folder=target, remaps={remap.rel: remap}).run()
+        self.assertTrue(os.path.exists(os.path.join(target, ".mozilla/firefox/a.default/prefs.js")))
 
 
 if __name__ == "__main__":

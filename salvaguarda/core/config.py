@@ -6,7 +6,7 @@ import json
 import os
 import uuid
 from dataclasses import asdict, dataclass, field, fields
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, get_type_hints
 
 from . import paths
 
@@ -49,6 +49,7 @@ class Settings:
     copy_app_to_disk: bool = True
     warn_open_apps: bool = True
     remind_after_days: int = 7  # 0 = never
+    save_inventory: bool = True  # list of installed programs in Extras (added in 1.1.0)
 
 
 @dataclass
@@ -113,7 +114,14 @@ class Config:
 
     # -- serialisation -------------------------------------------------------
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        """Known fields plus any keys a newer version wrote (kept untouched)."""
+        data: Dict[str, Any] = dict(getattr(self, "_unknown", {}))
+        data.update(asdict(self))
+        settings = dict(getattr(self, "_unknown_settings", {}))
+        settings.update(data["settings"])
+        data["settings"] = settings
+        data["version"] = max(self.version, CONFIG_VERSION)
+        return data
 
     def snapshot(self) -> Dict[str, Any]:
         """What is stored on the disk so a new installation can reuse the choices."""
@@ -123,33 +131,28 @@ class Config:
         return data
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "Config":
-        def pick(klass, raw):
-            names = {f.name for f in fields(klass)}
-            return {k: v for k, v in (raw or {}).items() if k in names}
-
-        settings = Settings(**pick(Settings, data.get("settings")))
-        settings.custom_excludes = [str(x) for x in settings.custom_excludes or []]
-        sources = []
-        for raw in data.get("sources") or []:
-            try:
-                sources.append(SourceEntry(**pick(SourceEntry, raw)))
-            except TypeError:
-                continue
-        destinations = []
-        for raw in data.get("destinations") or []:
-            try:
-                destinations.append(Destination(**pick(Destination, raw)))
-            except TypeError:
-                continue
-        return cls(
-            computer_name=str(data.get("computer_name") or ""),
-            configured=bool(data.get("configured", False)),
+    def from_dict(cls, data: Any) -> "Config":
+        data = migrate(data if isinstance(data, dict) else {})
+        settings_raw = data.get("settings") if isinstance(data.get("settings"), dict) else {}
+        settings = Settings(**_clean(Settings, settings_raw))
+        sources = [SourceEntry(**v) for v in (_clean(SourceEntry, r) for r in _as_list(data.get("sources")))
+                   if "kind" in v and "key" in v]
+        destinations = [Destination(**v) for v in (_clean(Destination, r) for r in _as_list(data.get("destinations")))
+                        if "id" in v and "name" in v and "path" in v]
+        top = _clean(cls, data)
+        config = cls(
+            computer_name=top.get("computer_name", ""),
+            configured=top.get("configured", False),
             sources=sources,
             destinations=destinations,
             settings=settings,
-            version=int(data.get("version") or CONFIG_VERSION),
+            version=max(top.get("version", CONFIG_VERSION), CONFIG_VERSION),
         )
+        known = {f.name for f in fields(cls)}
+        config._unknown = {k: v for k, v in data.items() if k not in known}
+        known_settings = {f.name for f in fields(Settings)}
+        config._unknown_settings = {k: v for k, v in settings_raw.items() if k not in known_settings}
+        return config
 
     def adopt_snapshot(self, data: Dict[str, Any]) -> None:
         """Import the choices saved on the disk by a previous installation."""
@@ -205,3 +208,53 @@ def read_json(path: str) -> Optional[Any]:
             return json.load(fh)
     except (OSError, ValueError):
         return None
+
+
+# -- schema evolution ---------------------------------------------------------
+# Rules: a new version only ADDS keys (never renames, removes or changes the type
+# of an existing one); each migration takes the dict of version N and returns the
+# dict of version N+1, and must be idempotent because an older app keeps writing
+# the keys it knows.
+MIGRATIONS: Dict[int, Callable[[Dict[str, Any]], Dict[str, Any]]] = {}
+
+
+def migrate(data: Dict[str, Any]) -> Dict[str, Any]:
+    raw = data.get("version")
+    version = raw if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0 else 1
+    while version < CONFIG_VERSION:
+        step = MIGRATIONS.get(version)
+        if step is not None:
+            data = step(dict(data))
+        version += 1
+    return data
+
+
+def _as_list(raw: Any) -> List[Any]:
+    return raw if isinstance(raw, list) else []
+
+
+def _clean(klass, raw: Any) -> Dict[str, Any]:
+    """Known fields of ``klass`` whose value has the expected type; the rest is dropped."""
+    if not isinstance(raw, dict):
+        return {}
+    hints = get_type_hints(klass)
+    out: Dict[str, Any] = {}
+    for f in fields(klass):
+        if f.name not in raw:
+            continue
+        value, kind = raw[f.name], hints.get(f.name)
+        if kind is bool:
+            if isinstance(value, bool):
+                out[f.name] = value
+        elif kind is int:
+            if isinstance(value, int) and not isinstance(value, bool):
+                out[f.name] = value
+            elif isinstance(value, str) and value.strip().isdigit():
+                out[f.name] = int(value)
+        elif kind is str:
+            if isinstance(value, str):
+                out[f.name] = value
+        elif getattr(kind, "__origin__", None) is list:
+            if isinstance(value, list):
+                out[f.name] = [x for x in value if isinstance(x, str)]
+    return out

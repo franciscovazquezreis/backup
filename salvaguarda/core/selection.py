@@ -17,6 +17,8 @@ SECTION_PRESETS = "presets"
 SECTION_OTHER = "other"
 
 DCONF_EXTRA_NAME = "definicoes-do-ambiente-de-trabalho.ini"
+INVENTORY_EXTRA_NAME = "programas-instalados.md"
+KIND_EXTRA = "extra"
 
 
 @dataclass
@@ -131,7 +133,7 @@ def build_candidates(config: Config, scan: Optional[catalog.HomeScan] = None) ->
             add_path_candidate(paths.from_portable(entry.key), entry.kind, entry.enabled)
 
     for preset in catalog.PRESETS:
-        entry = config.find(KIND_PRESET, preset.id)
+        entry = config.find(KIND_PRESET, preset.id) or _aliased_entry(config, preset.id)
         existing = catalog.preset_existing_paths(preset)
         has_extra = preset.extra == "dconf" and _dconf_available()
         if not existing and not has_extra and entry is None:
@@ -150,8 +152,22 @@ def _dconf_available() -> bool:
     return which("dconf") is not None
 
 
+def _aliased_entry(config: Config, preset_id: str):
+    """The user's choice saved under an older id of this preset (catalog.PRESET_ALIASES)."""
+    for old, new in catalog.PRESET_ALIASES.items():
+        if new == preset_id:
+            entry = config.find(KIND_PRESET, old)
+            if entry is not None:
+                return entry
+    return None
+
+
 def dconf_extra_path() -> str:
     return os.path.join(paths.app_state_dir(), "extras", DCONF_EXTRA_NAME)
+
+
+def inventory_extra_path() -> str:
+    return os.path.join(paths.app_state_dir(), "extras", INVENTORY_EXTRA_NAME)
 
 
 @dataclass
@@ -161,6 +177,7 @@ class Resolution:
     missing: List[ResolvedSource] = field(default_factory=list)  # enabled but not found
     nested: List[ResolvedSource] = field(default_factory=list)  # already inside another root
     wants_dconf: bool = False
+    wants_inventory: bool = False
 
 
 _ORDER = {KIND_PRESET: 0, KIND_PROJECT: 1, KIND_XDG: 2, KIND_LOOSE: 3, KIND_FOLDER: 4}
@@ -207,6 +224,14 @@ def resolve(config: Config, candidates: Optional[List[Candidate]] = None) -> Res
                 exists=os.path.lexists(path), icon=cand.icon,
                 xdg_key=cand.key if cand.kind == KIND_XDG else "",
             ))
+
+    if config.settings.save_inventory:
+        res.wants_inventory = True
+        raw.append(ResolvedSource(
+            KIND_EXTRA, "inventory", "Lista de programas instalados", inventory_extra_path(),
+            os.path.join(EXTRAS_DIR, INVENTORY_EXTRA_NAME), exists=True,
+            version_max_size=max_preset, icon="view-list-symbolic", extra="inventory",
+        ))
 
     raw.sort(key=lambda s: _ORDER.get(s.kind, 9))
     present = [s for s in raw if s.exists]

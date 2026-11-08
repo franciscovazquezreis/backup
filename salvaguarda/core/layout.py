@@ -42,6 +42,14 @@ COMPUTER_META = "salvaguarda.json"
 STATUS_FILE = "estado.json"
 LOCK_FILE = ".salvaguarda.lock"
 TMP_PREFIX = ".sgtmp-"
+# Version of the folder layout on the disk. Bump only for changes that an older
+# version would misread; older versions refuse to write to a disk with a higher one.
+DISK_FORMAT = 1
+
+
+def disk_format(marker: Optional[Dict[str, Any]]) -> int:
+    value = (marker or {}).get("formato", 1)
+    return value if isinstance(value, int) and not isinstance(value, bool) else 1
 
 _RESERVED = {APP_DIR.lower(), README_NAME.lower(), DISK_MARKER.lower()}
 
@@ -114,6 +122,7 @@ def init_root(root: str, disk_id: str, name: str) -> None:
             "id": disk_id,
             "nome": name,
             "criado": fmt.iso(_dt.datetime.now()),
+            "formato": DISK_FORMAT,
             "aviso": "Ficheiro da Salvaguarda. Não apagues: identifica este disco de cópias.",
         }
         if marker:

@@ -2,5 +2,5 @@
 
 APP_NAME = "Salvaguarda"
 APP_ID = "io.github.franciscovazquezreis.Salvaguarda"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 WEBSITE = "https://github.com/franciscovazquezreis/backup"

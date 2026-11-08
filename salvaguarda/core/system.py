@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import os
+import pwd
 import shutil
 import subprocess
-from typing import List, Optional, Set
+from typing import Dict, List, Optional, Set
 
 
 def running_process_names() -> Set[str]:
@@ -112,6 +113,30 @@ def os_pretty_name() -> str:
     except OSError:
         pass
     return "Linux"
+
+
+def os_release() -> Dict[str, str]:
+    """Identification of the distribution (/etc/os-release), in the metadata's own keys."""
+    keys = {"ID": "id", "VERSION_ID": "versao", "ID_LIKE": "id_like",
+            "VERSION_CODENAME": "codinome", "PRETTY_NAME": "nome"}
+    result: Dict[str, str] = {}
+    try:
+        with open("/etc/os-release", encoding="utf-8") as fh:
+            for line in fh:
+                key, _, value = line.strip().partition("=")
+                if key in keys:
+                    result[keys[key]] = value.strip().strip('"')
+    except OSError:
+        pass
+    return result
+
+
+def user_name() -> str:
+    """Login name of the current user ($USER is empty under cron or systemd)."""
+    try:
+        return pwd.getpwuid(os.getuid()).pw_name
+    except (KeyError, OSError):
+        return os.environ.get("USER", "")
 
 
 def open_in_file_manager(path: str) -> None:

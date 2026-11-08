@@ -185,8 +185,11 @@ PRESETS: Tuple[Preset, ...] = (
     ),
     Preset(
         "keyrings", "security", "Porta-chaves do sistema",
-        "Palavras-passe guardadas por apps e pelo ambiente de trabalho",
-        "dialog-password-symbolic", (".local/share/keyrings",),
+        "Palavras-passe guardadas por apps e pelo ambiente de trabalho, certificados e "
+        "a carteira do KDE",
+        "dialog-password-symbolic",
+        (".local/share/keyrings", ".local/share/kwalletd", ".config/kwalletrc", ".pki/nssdb",
+         ".local/share/mkcert"),
     ),
     Preset(
         "keepassxc", "security", "KeePassXC",
@@ -204,47 +207,117 @@ PRESETS: Tuple[Preset, ...] = (
     ),
     Preset(
         "ai", "dev", "Assistentes de IA",
-        "Claude Code, Codex, Gemini CLI, Copilot, Continue e OpenCode: "
-        "definições, servidores MCP e histórico",
+        "Claude Code, Codex, Gemini, Copilot, Qwen, Continue, OpenCode, Cline, Roo, Goose, "
+        "Amp, Crush e Aider: definições, regras, skills, servidores MCP, chaves e histórico "
+        "de conversas",
         "dialog-information-symbolic",
-        (".claude", ".claude.json", ".codex", ".gemini", ".config/github-copilot",
-         ".continue", ".config/opencode", ".local/share/opencode", ".aider.conf.yml"),
-        home_excludes=((".continue/index/", CAT_CACHES),),
+        (".claude", ".claude.json", ".config/anthropic", ".agents",
+         ".codex", ".gemini", ".qwen", ".copilot", ".config/github-copilot",
+         ".continue", ".config/opencode", ".local/share/opencode",
+         ".cline", ".roo", ".kilocode", ".config/kilo",
+         ".config/goose", ".local/share/goose", ".config/amp",
+         ".config/crush", ".local/share/crush",
+         ".aider", ".aider.conf.yml", ".aider.model.settings.yml", ".aider.model.metadata.json"),
+        home_excludes=(
+            (".continue/index/", CAT_CACHES),
+            (".continue/logs/", CAT_CACHES),
+            (".claude/debug/", CAT_CACHES),
+            (".claude/shell-snapshots/", CAT_CACHES),
+            (".claude/session-env/", CAT_CACHES),
+            (".codex/packages/", CAT_TOOLS),
+            (".codex/log/", CAT_CACHES),
+            (".copilot/logs/", CAT_CACHES),
+            (".gemini/bin/", CAT_TOOLS),
+            (".qwen/bin/", CAT_TOOLS),
+            (".local/share/opencode/log/", CAT_CACHES),
+            (".aider/caches/", CAT_CACHES),
+        ),
+    ),
+    Preset(
+        "claude_desktop", "dev", "Claude (app de computador)",
+        "Servidores MCP, preferências e resultados do Cowork. A máquina virtual do Cowork "
+        "e a cópia interna do Claude Code não são copiadas",
+        "dialog-information-symbolic",
+        (".config/Claude", ".config/claude-desktop-debian"),
+        _CHROMIUM_CACHES,
+        home_excludes=(
+            (".config/Claude/vm_bundles/", CAT_TOOLS),
+            (".config/Claude/claude-code/", CAT_TOOLS),
+            (".config/Claude/claude-code-vm/", CAT_TOOLS),
+            (".config/Claude/logs/", CAT_CACHES),
+        ),
+    ),
+    Preset(
+        "local_ai", "dev", "Modelos locais (Ollama e LM Studio)",
+        "Conversas, histórico, definições e chave do Ollama. Os modelos não são copiados: "
+        "ficam na lista de programas para voltar a descarregar",
+        "dialog-information-symbolic", (".ollama", ".lmstudio"),
     ),
     Preset(
         "vscode", "dev", "Visual Studio Code",
-        "Definições, atalhos, snippets e lista de extensões",
+        "Definições, atalhos, snippets, conversas do Copilot e de extensões de IA (Cline, "
+        "Roo, Kilo), ficheiros por guardar e lista de extensões",
         "accessories-text-editor-symbolic",
-        (".config/Code/User", ".vscode",
+        (".config/Code/User", ".config/Code/Backups", ".vscode",
          ".var/app/com.visualstudio.code/config/Code/User"),
         _EDITOR_EXTENSIONS, ("code",),
     ),
     Preset(
         "vscodium", "dev", "VSCodium",
-        "Definições, atalhos, snippets e lista de extensões",
+        "Definições, atalhos, snippets, ficheiros por guardar e lista de extensões",
         "accessories-text-editor-symbolic",
-        (".config/VSCodium/User", ".vscode-oss",
+        (".config/VSCodium/User", ".config/VSCodium/Backups", ".vscode-oss",
          ".var/app/com.vscodium.codium/config/VSCodium/User"),
         _EDITOR_EXTENSIONS, ("codium",),
     ),
     Preset(
         "cursor", "dev", "Cursor",
-        "Definições, atalhos, regras, servidores MCP e lista de extensões",
+        "Definições, atalhos, regras, conversas, servidores MCP e lista de extensões",
         "accessories-text-editor-symbolic",
-        (".config/Cursor/User", ".cursor"),
+        (".config/Cursor/User", ".config/Cursor/Backups", ".cursor", ".config/cursor"),
         _EDITOR_EXTENSIONS, ("cursor",),
     ),
     Preset(
         "windsurf", "dev", "Windsurf",
-        "Definições, memórias, servidores MCP e lista de extensões",
+        "Definições, memórias, conversas, servidores MCP e lista de extensões",
         "accessories-text-editor-symbolic",
-        (".config/Windsurf/User", ".windsurf", ".codeium/windsurf"),
+        (".config/Windsurf/User", ".config/Windsurf/Backups", ".windsurf", ".codeium/windsurf"),
         _EDITOR_EXTENSIONS, ("windsurf",),
     ),
     Preset(
+        "kiro", "dev", "Kiro",
+        "Definições, steering, hooks, servidores MCP, conversas e lista de extensões",
+        "accessories-text-editor-symbolic",
+        (".config/Kiro/User", ".kiro", ".local/share/kiro-cli"),
+        _EDITOR_EXTENSIONS,
+    ),
+    Preset(
+        "ai_editors", "dev", "Trae e Void",
+        "Definições, regras, servidores MCP e lista de extensões",
+        "accessories-text-editor-symbolic",
+        (".config/Trae/User", ".trae", ".config/Trae CN/User", ".trae-cn",
+         ".config/Void/User", ".void-editor"),
+        _EDITOR_EXTENSIONS,
+    ),
+    Preset(
         "zed", "dev", "Zed",
-        "Definições, atalhos e temas",
-        "accessories-text-editor-symbolic", (".config/zed",), (), ("zed", "zed-editor"),
+        "Definições, atalhos, temas, conversas do agente e biblioteca de prompts",
+        "accessories-text-editor-symbolic",
+        (".config/zed", ".local/share/zed",
+         ".var/app/dev.zed.Zed/config/zed", ".var/app/dev.zed.Zed/data/zed"),
+        (), ("zed", "zed-editor"),
+        home_excludes=tuple(
+            (root + "/" + sub + "/", category)
+            for root in (".local/share/zed", ".var/app/dev.zed.Zed/data/zed")
+            for sub, category in (
+                ("extensions", CAT_TOOLS), ("remote_extensions", CAT_TOOLS),
+                ("languages", CAT_TOOLS), ("node", CAT_TOOLS), ("copilot", CAT_TOOLS),
+                ("prettier", CAT_TOOLS), ("debug_adapters", CAT_TOOLS),
+                ("external_agents", CAT_TOOLS), ("remote_servers", CAT_TOOLS),
+                ("devcontainer", CAT_TOOLS), ("logs", CAT_CACHES),
+                ("hang_traces", CAT_CACHES), ("embeddings", CAT_CACHES),
+            )
+        ),
     ),
     Preset(
         "jetbrains", "dev", "IDEs JetBrains",
@@ -252,14 +325,43 @@ PRESETS: Tuple[Preset, ...] = (
         "accessories-text-editor-symbolic", (".config/JetBrains",),
     ),
     Preset(
+        "jupyter", "dev", "Jupyter e IPython",
+        "Definições, kernels registados, área de trabalho do JupyterLab e histórico do IPython",
+        "utilities-terminal-symbolic",
+        (".jupyter", ".local/share/jupyter", ".ipython"),
+        home_excludes=((".local/share/jupyter/runtime/", CAT_CACHES),),
+    ),
+    Preset(
+        "n8n", "dev", "n8n",
+        "Fluxos, credenciais e a chave que as decifra (pasta ~/.n8n)",
+        "emblem-system-symbolic", (".n8n",),
+    ),
+    Preset(
+        "cloud", "dev", "Contas de nuvem e publicação",
+        "Sessões e chaves de AWS, Google Cloud, Azure, Vercel, Netlify, Cloudflare, "
+        "Firebase, Supabase, Fly.io, Railway, Stripe e ngrok",
+        "network-server-symbolic",
+        (".aws", ".config/gcloud", ".azure", ".local/share/com.vercel.cli", ".now",
+         ".config/netlify", ".netlify", ".config/.wrangler", ".wrangler",
+         ".config/configstore", ".supabase", ".fly", ".railway",
+         ".config/stripe", ".config/ngrok"),
+        home_excludes=(
+            (".config/gcloud/logs/", CAT_CACHES),
+            (".azure/logs/", CAT_CACHES),
+            (".azure/cliextensions/", CAT_TOOLS),
+            (".fly/bin/", CAT_TOOLS),
+        ),
+    ),
+    Preset(
         "shell", "dev", "Terminal e shell",
-        "bash, zsh, fish, tmux, vim, neovim e emuladores de terminal",
+        "bash, zsh, fish, tmux, vim, neovim, Warp e outros emuladores de terminal",
         "utilities-terminal-symbolic",
         (".bashrc", ".bash_aliases", ".bash_profile", ".bash_logout", ".profile",
          ".bash_history", ".zshrc", ".zprofile", ".zshenv", ".zsh_history", ".p10k.zsh",
          ".oh-my-zsh", ".config/fish", ".inputrc", ".tmux.conf", ".config/tmux",
          ".vimrc", ".vim", ".config/nvim", ".config/starship.toml", ".config/alacritty",
-         ".config/kitty", ".config/terminator", ".config/tilix"),
+         ".config/kitty", ".config/terminator", ".config/tilix", ".config/environment.d",
+         ".config/warp-terminal", ".local/share/warp-terminal", ".local/state/warp-terminal"),
         (("cache/", CAT_CACHES),),
     ),
     Preset(
@@ -268,22 +370,40 @@ PRESETS: Tuple[Preset, ...] = (
         "application-x-executable-symbolic", ("bin", ".local/bin"),
     ),
     Preset(
-        "pkgconf", "dev", "npm, pip, Cargo e Docker",
-        "Configuração e credenciais dos gestores de pacotes",
+        "user_services", "dev", "Serviços do utilizador",
+        "Serviços que arrancam sozinhos (systemd), como servidores MCP, n8n ou Ollama",
+        "emblem-system-symbolic",
+        (".config/systemd/user", ".local/share/systemd/user"),
+    ),
+    Preset(
+        "pkgconf", "dev", "npm, pip, Cargo, uv e Docker",
+        "Configuração e credenciais dos gestores de pacotes, de versões e de contentores",
         "package-x-generic-symbolic",
-        (".npmrc", ".yarnrc", ".yarnrc.yml", ".config/pip", ".pypirc",
-         ".cargo/config.toml", ".cargo/credentials.toml", ".docker/config.json"),
+        (".npmrc", ".yarnrc", ".yarnrc.yml", ".bunfig.toml", ".config/pnpm", ".config/pip",
+         ".pip", ".pypirc", ".config/uv", ".cargo/config.toml", ".cargo/config",
+         ".cargo/credentials.toml", ".cargo/credentials", ".cargo/.crates.toml",
+         ".cargo/.crates2.json", ".config/go/env", ".docker/config.json", ".docker/contexts",
+         ".config/containers", ".netrc", ".tool-versions", ".asdfrc", ".config/mise",
+         ".config/direnv"),
     ),
     # Desktop
     Preset(
         "desktop", "desktop", "Definições do ambiente de trabalho",
-        "Painel, atalhos de teclado, aparência, fundo, applets e marcadores do "
-        "gestor de ficheiros",
+        "Painel, atalhos de teclado, aparência, fundo, applets, web apps e marcadores do "
+        "gestor de ficheiros (Cinnamon, GNOME, MATE, Xfce, KDE, COSMIC e LXQt)",
         "preferences-desktop-appearance-symbolic",
         (".local/share/cinnamon", ".config/cinnamon", ".cinnamon", ".config/autostart",
          ".local/share/applications", ".config/menus", ".config/gtk-3.0",
          ".config/gtk-4.0", ".config/mimeapps.list", ".config/nemo", ".local/share/nemo",
-         ".config/caja", ".config/xfce4", ".local/share/gnome-shell/extensions"),
+         ".config/caja", ".config/xfce4", ".local/share/gnome-shell/extensions",
+         ".local/share/ice",
+         ".config/kdeglobals", ".config/kwinrc", ".config/kwinrulesrc",
+         ".config/kglobalshortcutsrc", ".config/khotkeysrc", ".config/kxkbrc",
+         ".config/plasma-org.kde.plasma.desktop-appletsrc", ".config/plasmashellrc",
+         ".config/plasmarc", ".config/kscreenlockerrc", ".config/ksmserverrc",
+         ".config/krunnerrc", ".config/dolphinrc", ".config/konsolerc",
+         ".local/share/konsole", ".local/share/plasma",
+         ".config/cosmic", ".config/lxqt"),
         (), (), extra="dconf",
     ),
     Preset(
@@ -309,7 +429,18 @@ PRESETS: Tuple[Preset, ...] = (
         "antigas que já não interessam",
         "emblem-system-symbolic", (".config",), default_on=False,
     ),
+    Preset(
+        "sandboxed", "advanced", "Dados de apps Snap e Flatpak",
+        "Definições e dados de todas as apps instaladas como snap ou Flatpak (sem caches). "
+        "Pode ocupar bastante espaço",
+        "package-x-generic-symbolic", ("snap", ".var/app"), default_on=False,
+    ),
 )
+
+# Preset ids are stored in config.json: never rename or remove one. If a preset must
+# change id, map the old id to the new one here, so the user's choice is kept and its
+# copy does not leave «Cópia atual».
+PRESET_ALIASES: Dict[str, str] = {}
 
 PRESETS_BY_ID: Dict[str, Preset] = {p.id: p for p in PRESETS}
 

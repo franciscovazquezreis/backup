@@ -93,12 +93,20 @@ def history_path() -> str:
 
 
 def load_history() -> List[Dict[str, Any]]:
+    """Runs recorded on this computer. The format is frozen: a JSON list of objects.
+
+    New versions may add keys to each entry, never change the container, so older
+    versions can still read (and append to) the file after a downgrade.
+    """
     data = read_json(history_path())
-    return data if isinstance(data, list) else []
+    return [e for e in data if isinstance(e, dict)] if isinstance(data, list) else []
 
 
 def append_history(entry: Dict[str, Any]) -> None:
-    history = load_history()
+    raw = read_json(history_path())
+    if raw is not None and not isinstance(raw, list):
+        return  # written in a format this version does not know: leave it alone
+    history = [e for e in (raw or []) if isinstance(e, dict)]
     history.append(entry)
     history = history[-HISTORY_LIMIT:]
     try:

@@ -1,0 +1,8 @@
+#!/bin/sh
+# Called by python3 when the default Python version changes (distribution upgrade).
+set -e
+
+if [ "$1" = rtupdate ]; then
+    py3clean -p salvaguarda /usr/share/salvaguarda >/dev/null 2>&1 || true
+    py3compile -p salvaguarda /usr/share/salvaguarda >/dev/null 2>&1 || true
+fi

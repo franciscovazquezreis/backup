@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from typing import TYPE_CHECKING, Callable, List, Optional
 
 import gi
@@ -13,7 +14,8 @@ from gi.repository import GObject, Gtk, Pango  # noqa: E402
 from .. import APP_NAME, VERSION, WEBSITE  # noqa: E402
 from ..core import controller, fmt, fsinfo, paths, report, system  # noqa: E402
 from ..core.config import Config, Destination  # noqa: E402
-from ..core.layout import list_computers, root_for_mount  # noqa: E402
+from ..core.exclusions import validate_custom  # noqa: E402
+from ..core.layout import list_computers, root_for_mount, sanitize_computer_name  # noqa: E402
 from . import common  # noqa: E402
 from .disks import Disk, DiskMonitor, describe_path  # noqa: E402
 from .selection_widget import SelectionWidget  # noqa: E402
@@ -137,7 +139,6 @@ def prepare_disk(window: Gtk.Window, config: Config, disk: Disk) -> Optional[Des
             "fiéis, formata o disco em ext4 com a app Discos. Atenção: formatar apaga tudo o "
             "que está no disco.", options, kind=Gtk.MessageType.WARNING, suggested="back")
         if answer == "format" and tool:
-            import subprocess
             try:
                 subprocess.Popen(tool)
             except OSError:
@@ -315,6 +316,12 @@ class PreferencesDialog(Gtk.Dialog):
         listbox.add(common.row("Guardar uma cópia da app no disco",
                                "Para restaurar depois de formatar, mesmo sem internet e sem instalar nada.",
                                None, self.app_switch))
+        self.inventory_switch = Gtk.Switch()
+        self.inventory_switch.set_active(s.save_inventory)
+        listbox.add(common.row("Guardar a lista de programas instalados",
+                               "Para os voltares a instalar noutro sistema: pacotes, snaps, "
+                               "Flatpaks, ferramentas de programação, modelos de IA e extensões "
+                               "dos editores.", None, self.inventory_switch))
         self.apps_switch = Gtk.Switch()
         self.apps_switch.set_active(s.warn_open_apps)
         listbox.add(common.row("Avisar se o navegador ou o e-mail estiverem abertos",
@@ -378,14 +385,13 @@ class PreferencesDialog(Gtk.Dialog):
         s.exclude_tools = self.tools_switch.get_active()
         buf = self.custom_view.get_buffer()
         text = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False)
-        from ..core.exclusions import validate_custom
         s.custom_excludes = validate_custom(text.splitlines())
         s.copy_app_to_disk = self.app_switch.get_active()
+        s.save_inventory = self.inventory_switch.get_active()
         s.warn_open_apps = self.apps_switch.get_active()
         s.remind_after_days = int(self.remind_combo.get_active_id() or 7)
         name = self.name_entry.get_text().strip()
         if name:
-            from ..core.layout import sanitize_computer_name
             self.working.computer_name = sanitize_computer_name(name)
         return self.working
 

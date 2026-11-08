@@ -2,8 +2,11 @@
 set -e
 
 case "$1" in
-    remove|upgrade|deconfigure)
-        find /usr/share/salvaguarda -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
+    remove|upgrade|deconfigure|failed-upgrade)
+        if command -v py3clean >/dev/null 2>&1; then
+            py3clean -p salvaguarda >/dev/null 2>&1 || true
+        fi
+        find /usr/share/salvaguarda -depth -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
         ;;
 esac
 

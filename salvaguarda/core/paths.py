@@ -69,8 +69,12 @@ def app_data_dir() -> str:
     return os.path.join(data_home(), "salvaguarda")
 
 
-def xdg_user_dirs() -> Dict[str, str]:
-    """Return the XDG user directories that exist and are not the home itself."""
+def xdg_user_dirs(existing_only: bool = True) -> Dict[str, str]:
+    """Return the XDG user directories that are not the home itself.
+
+    With ``existing_only`` (the default) folders that do not exist are left out; the
+    restore asks for all of them, to recreate a folder the new system has not made yet.
+    """
     result: Dict[str, str] = {}
     user_home = home()
     path = os.path.join(config_home(), "user-dirs.dirs")
@@ -99,7 +103,7 @@ def xdg_user_dirs() -> Dict[str, str]:
     return {
         key: value
         for key, value in result.items()
-        if os.path.normpath(value) != user_home and os.path.isdir(value)
+        if os.path.normpath(value) != user_home and (os.path.isdir(value) or not existing_only)
     }
 
 
