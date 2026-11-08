@@ -32,8 +32,10 @@ def dconf_available() -> bool:
     return shutil.which("dconf") is not None
 
 
-def dconf_dump(target: str) -> Optional[str]:
-    """Export all desktop settings to ``target``. Returns an error message or None."""
+def dconf_dump(target: str, header: str = "") -> Optional[str]:
+    """Export all desktop settings to ``target``. Returns an error message or None.
+
+    ``header`` is written first (comment lines, which ``dconf load`` ignores)."""
     if not dconf_available():
         return "o programa dconf não está instalado"
     try:
@@ -43,19 +45,26 @@ def dconf_dump(target: str) -> Optional[str]:
         return str(exc)
     if out.returncode != 0:
         return out.stderr.decode("utf-8", "replace").strip() or "erro desconhecido"
-    os.makedirs(os.path.dirname(target), exist_ok=True)
-    tmp = target + ".tmp"
-    with open(tmp, "wb") as fh:
-        fh.write(out.stdout)
+    data = header.encode("utf-8") + out.stdout
     # Keep the modification date stable when nothing changed, so it is not copied again.
     try:
         with open(target, "rb") as fh:
-            if fh.read() == out.stdout:
-                os.unlink(tmp)
+            if fh.read() == data:
                 return None
     except OSError:
         pass
-    os.replace(tmp, target)
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    tmp = target + ".tmp"
+    try:
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     return None
 
 

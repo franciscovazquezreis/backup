@@ -43,6 +43,17 @@ class VariantTests(TmpCase):
         self.assertEqual([(r.source, r.target, r.destination) for r in plan],
                          [("deb", "snap", "snap/firefox/common/.mozilla")])
 
+    def test_remap_onto_a_folder_that_another_item_restores_is_skipped(self):
+        """The old snap profile comes back with «Apps em snap e Flatpak»: the deb profile
+        must not be poured into the same folder."""
+        from salvaguarda.core import restore
+
+        os.makedirs(os.path.join(self.root, "snap/firefox/current"))
+        firefox = restore.RestoreItem("Firefox", "preset", "firefox", ["Pasta pessoal/.mozilla"])
+        sandboxed = restore.RestoreItem("Apps", "preset", "sandboxed", ["Pasta pessoal/snap"])
+        self.assertTrue(restore.plan_variants([firefox], self.probe()))
+        self.assertEqual(restore.plan_variants([firefox, sandboxed], self.probe()), {})
+
     def test_wrapper_alone_counts_as_snap(self):
         self.touch("/usr/bin/firefox", '#!/bin/sh\nexec /snap/bin/firefox "$@"\n')
         self.assertEqual(va.installed_kinds("firefox", self.probe()), ["snap"])
@@ -172,6 +183,23 @@ class DesktopTests(TmpCase):
         self.assertIn("file:///home/bruno/Pictures/F%C3%A9rias/praia.jpg", plan.text)
         self.assertIn("custom-command='/home/bruno/.local/bin/fish'", plan.text)
         self.assertEqual(plan.rewritten, 2)
+
+    def test_folders_outside_the_old_home_keep_their_paths(self):
+        pairs = ds.path_pairs("/home/ana", "/home/ana", {"PICTURES": "/mnt/dados/Fotos"},
+                              {"PICTURES": "/home/ana/Imagens"})
+        self.assertEqual(pairs, [])
+
+    def test_export_header_wins_over_the_metadata(self):
+        """An old export in «Versões anteriores» says itself which desktop wrote it."""
+        text = ds.dump_header(ds.CINNAMON) + CINNAMON_DUMP
+        self.assertEqual(ds.desktop_in_header(text), ds.CINNAMON)
+        plan = ds.DesktopPlan(text, ds.GNOME, ds.GNOME, self.home, (), self.root)
+        self.assertFalse(plan.same_desktop)
+        self.assertNotIn("[org/cinnamon", plan.text)
+        self.assertNotIn("salvaguarda-ambiente", plan.text)
+        unknown = ds.DesktopPlan(ds.dump_header("") + CINNAMON_DUMP, "", "", self.home, (),
+                                 self.root)
+        self.assertTrue(any("Não foi possível confirmar" in n for n in unknown.notes()))
 
     def test_rewrite_respects_boundaries(self):
         text, n = ds.rewrite_paths("a='/home/anabela/x' b='/home/ana'", [("/home/ana", "/home/bruno")])
@@ -315,6 +343,11 @@ class PostRestoreTests(TmpCase):
                          "/home/anabela/x")
         self.assertEqual(postrestore.relink("../x", "/home/ana", "/home/bruno"), "../x")
         self.assertEqual(postrestore.relink("/usr/bin/x", "/home/ana", "/home/bruno"), "/usr/bin/x")
+        moved = [("/home/ana/Documentos", "/home/bruno/Documents")]
+        self.assertEqual(postrestore.relink("/home/ana/Documentos/a.sh", "/home/ana",
+                                            "/home/bruno", moved), "/home/bruno/Documents/a.sh")
+        self.assertEqual(postrestore.relink("/home/ana/bin/x", "/home/ana", "/home/bruno", moved),
+                         "/home/bruno/bin/x")
 
     def test_shell_findings(self):
         self.touch(".bashrc", "alias ll='ls -l'\n"

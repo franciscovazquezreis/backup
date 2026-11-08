@@ -11,19 +11,20 @@ import dataclasses
 import datetime as _dt
 import fnmatch
 import os
+import re
 import shutil
 import stat
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from . import desktop, fileops, fmt, fsinfo, paths, postrestore, system, variants
 from .engine import (PHASE_COPY, PHASE_FINISH, PHASE_PREPARE, PHASE_SCAN, PROGRESS_INTERVAL,
                      STATUS_CANCELLED, STATUS_FAILED, STATUS_NOTHING, STATUS_OK, STATUS_WARNINGS,
                      Callbacks, Issue, Progress)
 from .fileops import Cancelled, EntryError, Fatal
-from .layout import EXTRAS_DIR, HOME_DIR, OTHER_DIR, TMP_PREFIX
+from .layout import CURRENT_DIR, EXTRAS_DIR, HOME_DIR, OTHER_DIR, TMP_PREFIX
 
 CONFLICT_REPLACE = "replace"
 CONFLICT_SKIP = "skip"
@@ -201,12 +202,39 @@ def plan_variants(items: List[RestoreItem],
                   probe: Optional[variants.Probe] = None) -> Dict[str, variants.Remap]:
     """Profiles that should go to another packaging of the same app (deb, snap, Flatpak)."""
     probe = probe or variants.Probe(paths.home())
+    all_rels = [rel for item in items for rel in item.rels]
     found: Dict[str, variants.Remap] = {}
     for item in items:
         if item.kind == "preset" and item.key in variants.APP_VARIANTS:
             for remap in variants.plan_remaps(item.key, item.rels, probe):
+                dest = HOME_DIR + "/" + remap.destination
+                if any(rel != remap.rel and _overlaps(rel, dest) for rel in all_rels):
+                    # Another item of the copy restores into that place (the old snap
+                    # profile, with «Apps em snap e Flatpak»): both go back as they were.
+                    continue
                 found[remap.rel] = remap
     return found
+
+
+def _overlaps(a: str, b: str) -> bool:
+    return a == b or a.startswith(b + "/") or b.startswith(a + "/")
+
+
+def snap_warnings(items: List[RestoreItem], remaps: Dict[str, variants.Remap],
+                  probe: Optional[variants.Probe] = None) -> Dict[str, str]:
+    """Rels restored to their own place inside ~/snap/<x>/current while that snap never
+    ran here: snapd needs a link there, so the restore leaves them out (warning)."""
+    probe = probe or variants.Probe(paths.home())
+    out: Dict[str, str] = {}
+    for item in items:
+        for rel in item.rels:
+            parts = rel.split("/", 1)
+            if rel in remaps or parts[0] != HOME_DIR or len(parts) < 2:
+                continue
+            snap = variants.snap_user_dir_problem(parts[1], probe)
+            if snap:
+                out[rel] = variants.snap_warning(snap)
+    return out
 
 
 class Destinations:
@@ -233,6 +261,22 @@ class Destinations:
         for key, old in old_xdg.items():
             if key in new_xdg and old.startswith("~/") and len(old) > 2:
                 self.xdg_map[old[2:]] = new_xdg[key]
+
+    def keep_apart(self, tree_root: str) -> None:
+        """An old XDG folder ("Documentos") is not moved onto a folder that the same copy
+        also holds ("Documents", chosen on its own): the two would mix on every restore."""
+        for old in list(self.xdg_map):
+            new_rel = os.path.relpath(self.xdg_map[old], self.home)
+            if new_rel != old and not new_rel.startswith("..") and os.path.lexists(
+                    os.path.join(tree_root, HOME_DIR, new_rel)):
+                del self.xdg_map[old]
+
+    def moved_folders(self, old_home: str) -> List[Tuple[str, str]]:
+        """(old absolute folder, new folder) for the XDG folders that change place."""
+        if not old_home:
+            return []
+        return [(os.path.join(old_home, old), new) for old, new in self.xdg_map.items()
+                if os.path.join(self.home, old) != new]
 
     def for_rel(self, rel: str) -> Optional[str]:
         parts = rel.split(os.sep)
@@ -328,11 +372,15 @@ class RestoreEngine:
         self.replaced_dir = os.path.join(paths.app_data_dir(), "substituidos",
                                          fmt.stamp(self.started))
         self._replaced_used = False
+        self._snap_reported: Set[str] = set()
+        self._settings_partial = False
         self._last_emit = 0.0
         self._speed_t0 = 0.0
         self._speed_b0 = 0
         self._dest = Destinations(target, folder, self.meta,
                                   {rel: r.destination for rel, r in self.remaps.items()}, items)
+        self._dest.keep_apart(tree_root)
+        self._link_pairs = self._dest.moved_folders(self.old_home)
         self.tolerance_ns = 2_000_000_000
 
     # ----------------------------------------------------------------- helpers
@@ -422,6 +470,8 @@ class RestoreEngine:
         s = self.stats
         n = s.files_to_copy
         if not n and not s.links and self.settings_applied:
+            if self._settings_partial:
+                return "As definições das apps foram aplicadas."
             return "As definições do ambiente de trabalho foram aplicadas."
         parts = ["{} {} ({})".format(fmt.files(n), fmt.agree(n, "restaurado", "restaurados"),
                                      fmt.size(s.bytes_copied))]
@@ -489,6 +539,11 @@ class RestoreEngine:
             if self.dry:
                 self._issue(src, "Não foi possível ler a cópia: " + fileops.describe_error(exc), "error")
             return
+        missing = os.path.dirname(dst)
+        while missing and missing != os.sep and not os.path.lexists(missing):
+            if self._snap_current(missing):
+                return
+            missing = os.path.dirname(missing)
         if not self.dry:
             parent = os.path.dirname(dst)
             if not os.path.isdir(parent):
@@ -504,14 +559,31 @@ class RestoreEngine:
         elif stat.S_ISLNK(st.st_mode):
             self._restore_link(src, dst, st)
 
+    def _snap_current(self, dpath: str) -> bool:
+        """``dpath`` is ~/snap/<x>/current, which does not exist: snapd creates it as a
+        link the first time the snap runs, and a real folder there stops the snap."""
+        if self.target != TARGET_ORIGINAL:
+            return False
+        rel = paths.home_relative(dpath)
+        match = re.match(r"^snap/([^/]+)/current$", rel or "")
+        if not match or os.path.lexists(dpath):
+            return False
+        if dpath not in self._snap_reported:
+            self._snap_reported.add(dpath)
+            if self.dry:
+                self._issue(dpath, variants.snap_warning(match.group(1)))
+        return True
+
     def _move_aside(self, dpath: str) -> None:
         rel = paths.home_relative(dpath)
         if rel is None:
             rel = os.path.join(OTHER_DIR, dpath.lstrip(os.sep))
-        target = os.path.join(self.replaced_dir, rel)
-        os.makedirs(os.path.dirname(target), exist_ok=True)
-        if os.path.lexists(target):
-            target += ".{}".format(int(time.time()))
+        base = os.path.join(self.replaced_dir, rel)
+        os.makedirs(os.path.dirname(base), exist_ok=True)
+        target, number = base, 1
+        while os.path.lexists(target):  # never over an earlier saved copy
+            number += 1
+            target = "{}.{}".format(base, number)
         shutil.move(dpath, target)
         self._replaced_used = True
 
@@ -519,6 +591,17 @@ class RestoreEngine:
         self._check_cancel()
         d_st = _lstat(dpath)
         created = False
+        if d_st is not None and stat.S_ISLNK(d_st.st_mode):
+            # A link to a folder on this computer (dotfiles, snap "current", a data
+            # partition): the files go through it, the link stays.
+            try:
+                followed = os.stat(dpath)
+            except OSError:
+                followed = None
+            if followed is not None and stat.S_ISDIR(followed.st_mode):
+                d_st = followed
+        if d_st is None and self._snap_current(dpath):
+            return
         if d_st is not None and not stat.S_ISDIR(d_st.st_mode):
             if self.conflict == CONFLICT_SKIP:
                 self.stats.kept_existing += 1
@@ -674,7 +757,7 @@ class RestoreEngine:
             return
         if self.target == TARGET_ORIGINAL:
             # A link into the old home folder (/home/ana/...) follows the new one.
-            target = postrestore.relink(target, self.old_home, paths.home())
+            target = postrestore.relink(target, self.old_home, paths.home(), self._link_pairs)
         d_st = _lstat(dpath)
         if d_st is not None and stat.S_ISLNK(d_st.st_mode):
             try:
@@ -708,6 +791,10 @@ class RestoreEngine:
             here = desktop.current_desktop(processes=system.running_process_names())
         pairs = desktop.path_pairs(self.old_home, paths.home(), old_xdg_dirs(self.meta),
                                    paths.xdg_user_dirs(existing_only=False))
+        # The metadata describes the latest backup: an older export (from «Versões
+        # anteriores») may come from another desktop, so there only the file itself counts.
+        latest = os.path.basename(os.path.normpath(self.tree_root)) == CURRENT_DIR
+        source_desktop = str(self.meta.get("ambiente") or "") if latest else ""
         for item in self.items:
             for rel in item.settings_exports:
                 self._check_cancel()
@@ -718,8 +805,7 @@ class RestoreEngine:
                 except OSError as exc:
                     self._issue(source, "Não foi possível ler: " + fileops.describe_error(exc), "error")
                     continue
-                plan = desktop.DesktopPlan(text, str(self.meta.get("ambiente") or ""), here,
-                                           paths.home(), pairs)
+                plan = desktop.DesktopPlan(text, source_desktop, here, paths.home(), pairs)
                 if not plan.text.strip():
                     self.notes.extend(plan.notes())
                     continue
@@ -751,26 +837,37 @@ class RestoreEngine:
                     continue
                 self.settings_applied = True
                 self.notes.extend(plan.notes())
-                self.notes.append("As definições do ambiente de trabalho foram aplicadas. "
-                                  "Termina a sessão e volta a entrar para ver tudo como estava.")
+                if plan.skipped:
+                    self._settings_partial = True
+                    self.notes.append("Termina a sessão e volta a entrar para veres as "
+                                      "definições das apps.")
+                else:
+                    self.notes.append("Termina a sessão e volta a entrar para ver tudo como "
+                                      "estava.")
 
     def _after_restore_notes(self) -> None:
         """Things the user should know or do after restoring on this computer."""
         home = paths.home()
         keys = {i.key for i in self.items if i.kind == "preset"}
+        by_app: Dict[Tuple[str, str], List[str]] = {}
         for remap in self.remaps_detail():
-            self.notes.append("O {} foi restaurado para a versão instalada aqui ({}): ~/{}.".format(
-                remap.app.capitalize(), variants.KIND_LABELS.get(remap.target, remap.target),
-                remap.destination))
+            by_app.setdefault((remap.app, remap.target), []).append("~/" + remap.destination)
+        for (app, kind), places in by_app.items():
+            self.notes.append("O {} foi restaurado para a versão instalada aqui ({}): {}.".format(
+                variants.app_label(app), variants.KIND_LABELS.get(kind, kind),
+                ", ".join(places)))
         if "shell" in keys:
             for file, number, _line, problem in postrestore.shell_findings(home, self.old_home)[:8]:
                 self.notes.append("{}, linha {}: {}.".format(file, number, problem))
         mentions = postrestore.old_home_mentions(home, self.old_home, self._restored_settings)
         if mentions:
             shown = ", ".join("~/" + m for m in mentions[:8])
-            self.notes.append("Estes ficheiros ainda mencionam a pasta pessoal antiga ({}): {}. "
-                              "Corrige esses caminhos se alguma coisa não funcionar.".format(
-                                  self.old_home, shown))
+            self.notes.append(fmt.agree(
+                len(mentions),
+                "Este ficheiro ainda menciona a pasta pessoal antiga ({}): {}. Corrige esse "
+                "caminho se alguma coisa não funcionar.",
+                "Estes ficheiros ainda mencionam a pasta pessoal antiga ({}): {}. Corrige esses "
+                "caminhos se alguma coisa não funcionar.").format(self.old_home, shown))
         probe = variants.Probe(home)
         for app, label in (("firefox", "Firefox"), ("thunderbird", "Thunderbird")):
             if app not in keys:

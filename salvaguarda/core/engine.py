@@ -27,7 +27,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
-from . import fileops, fmt, fsinfo, paths
+from . import fileops, fmt, fsinfo, paths, portable
 from .exclusions import CATEGORY_LABELS, Exclusions
 from .fileops import Cancelled, DestinationLost, DiskFull, EntryError, Fatal
 from .layout import (DISK_FORMAT, HOME_DIR, OTHER_DIR, TMP_PREFIX, DiskLayout, disk_format,
@@ -119,6 +119,8 @@ class Question:
     options: List[Tuple[str, str]]  # (answer id, button label); first is the safe choice
     details: List[str] = field(default_factory=list)
     data: Dict[str, object] = field(default_factory=dict)
+    # Answer when nobody can be asked (keyboard shortcut, no terminal). Empty: options[0].
+    unattended: str = ""
 
 
 @dataclass
@@ -224,11 +226,13 @@ class BackupEngine:
         self._keep: Set[str] = set()
         self._keep_ancestors: Set[str] = set()
         self._root_mirrors: Set[str] = set()
+        self._root_ancestors: Set[str] = set()  # mirror folders above another root
         self._reported_mounts: Set[str] = set()
         self._home = paths.home()
         self._was_interrupted = False
         self._dest_ids: Set[Tuple[int, int]] = set()
         self._previous_app = ""
+        self._defer_shrink = False  # upgrade question not answered: nothing leaves the copy
         self._shrink_samples: List[str] = []
 
     # ------------------------------------------------------------------ helpers
@@ -449,6 +453,12 @@ class BackupEngine:
                     self.notes.append("A lista de programas instalados não foi atualizada: " + error)
 
         self._root_mirrors = {self.layout.mirror_abs(s.mirror_rel) for s in self.res.sources}
+        self._root_ancestors = set()
+        for mirror in self._root_mirrors:
+            parent = os.path.dirname(mirror)
+            while parent.startswith(self.layout.current_dir + os.sep):
+                self._root_ancestors.add(parent)
+                parent = os.path.dirname(parent)
         for rel in self.res.keep:
             self._protect(self.layout.mirror_abs(rel))
         for src in self.res.missing:
@@ -488,18 +498,34 @@ class BackupEngine:
                 and (plan.orphans or plan.newly_excluded)):
             # A new version (catalogue or exclusion rules) would take things out of the
             # copy on its first run: never do that silently.
+            count = plan.orphans + plan.newly_excluded
+            newer = portable.version_key(current_app) > portable.version_key(self._previous_app)
             question = Question(
-                "upgrade_shrink", "Esta versão nova deixa de copiar alguns itens",
-                "Desde a versão {} da Salvaguarda, {} deixam de ser copiados (por exemplo, "
-                "caches ou programas que se reinstalam). A cópia que já existe passa para "
-                "«Versões anteriores», de onde pode ser recuperada até ao fim do prazo definido. "
-                "Se não querias isto, cancela e revê «Alterar…» e as Definições.".format(
+                "upgrade_shrink", "Esta versão deixa de copiar alguns itens",
+                "Em relação à versão {} da Salvaguarda, {}, por mudanças {} ou nas tuas "
+                "escolhas (por exemplo, caches ou programas que se reinstalam). A cópia que "
+                "já existe passa para «Versões anteriores», de onde pode ser recuperada até ao "
+                "fim do prazo definido. Se não querias isto, cancela e revê «Alterar…» e as "
+                "Definições.".format(
                     self._previous_app,
-                    fmt.plural(plan.orphans + plan.newly_excluded, "item", "itens")),
+                    fmt.agree(count, "1 item deixa de ser copiado",
+                              "{} itens deixam de ser copiados".format(fmt.number(count))),
+                    "nesta versão" if newer else "entre versões"),
                 [("cancel", "Cancelar"), ("continue", "Continuar")],
                 details=list(self._shrink_samples),
+                unattended="later",
             )
-            if self.cb.ask(question) != "continue":
+            answer = self.cb.ask(question)
+            if answer == "later":
+                # Nobody to ask: copy what is new and keep the rest in «Cópia atual» until
+                # the question is answered in the window.
+                self._defer_shrink = True
+                self.notes.append(fmt.agree(
+                    count, "Um item que esta versão deixa de copiar ficou na «Cópia atual». "
+                           "Abre a Salvaguarda para decidir.",
+                    "{} itens que esta versão deixa de copiar ficaram na «Cópia atual». Abre a "
+                    "Salvaguarda para decidir.".format(fmt.number(count))))
+            elif answer != "continue":
                 raise Cancelled()
             asked_shrink = True
         if plan.orphan_files >= 200 and not asked_shrink:
@@ -568,7 +594,11 @@ class BackupEngine:
         self._pass = _Pass(dry)
         for src in self.res.sources:
             self._check_cancel()
-            self._process_root(src)
+            try:
+                self._process_root(src)
+            except EntryError as exc:  # the other items are still copied
+                self._protect(self.layout.mirror_abs(src.mirror_rel))
+                self._issue(src.path, str(exc), "error")
         self._process_orphans()
         return self._pass.stats
 
@@ -590,7 +620,7 @@ class BackupEngine:
             if self._pass.dry:
                 self._issue(src.path, "Não foi possível ler: " + fileops.describe_error(exc), "error")
             return
-        d_st = _lstat(dst)
+        d_st = _lstat(dst) if self._clear_mirror_ancestors(dst, src) else None
         if stat.S_ISDIR(st.st_mode):
             try:
                 entries = _list_dir(src.path)
@@ -617,6 +647,26 @@ class BackupEngine:
             self._protect(dst)
             if self._pass.dry:
                 self._issue(src.path, "Tipo de ficheiro não suportado (só ficheiros e pastas).")
+
+    def _clear_mirror_ancestors(self, dst: str, src: ResolvedSource) -> bool:
+        """A root never reads or writes through a link (or a file) that an earlier run left
+        in the mirror above it, which could even point back to the computer. Such an entry
+        goes to «Versões anteriores» and real folders take its place. Returns False when the
+        mirror of ``dst`` does not exist (yet) through real folders."""
+        rel = os.path.relpath(os.path.dirname(dst), self.layout.current_dir)
+        if rel in (".", "") or rel.startswith(".."):
+            return True
+        folder = self.layout.current_dir
+        for part in rel.split(os.sep):
+            folder = os.path.join(folder, part)
+            st = _lstat(folder)
+            if st is None:
+                return True  # nothing below exists: _ensure_parents creates real folders
+            if stat.S_ISDIR(st.st_mode):
+                continue
+            self._archive(folder, st, src, removed=True)
+            return not self._pass.dry
+        return True
 
     def _ensure_parents(self, dst: str) -> None:
         if self._pass.dry:
@@ -693,6 +743,12 @@ class BackupEngine:
             name = entry.name
             child_src = entry.path
             child_dst = os.path.join(dpath, name)
+            if child_dst in self._root_mirrors or (
+                    child_dst in self._root_ancestors and entry.is_symlink()):
+                # Another selected item copies this place itself, through real folders
+                # (a link it follows, for example): this item leaves it alone.
+                dst_entries.pop(name, None)
+                continue
             child_rel = None if home_rel is None else (name if home_rel == "" else home_rel + "/" + name)
             self._scanned(child_src)
             try:
@@ -740,6 +796,8 @@ class BackupEngine:
                 d = dst_entries.pop(name, None)
                 d_st = _entry_lstat(d)
                 if d_st is not None and not stat.S_ISDIR(d_st.st_mode):
+                    if self._type_change_kept(child_src, child_dst):
+                        continue
                     self._archive(child_dst, d_st, src)
                     d_st = None
                 self._sync_dir(child_src, child_dst, est, sub, src, root_dev, child_rel,
@@ -748,6 +806,8 @@ class BackupEngine:
                 d = dst_entries.pop(name, None)
                 d_st = _entry_lstat(d)
                 if d_st is not None and stat.S_ISDIR(d_st.st_mode):
+                    if self._type_change_kept(child_src, child_dst):
+                        continue
                     self._archive(child_dst, d_st, src)
                     d_st = None
                 self._sync_file(child_src, child_dst, est, d_st, src)
@@ -755,6 +815,8 @@ class BackupEngine:
                 d = dst_entries.pop(name, None)
                 d_st = _entry_lstat(d)
                 if d_st is not None and stat.S_ISDIR(d_st.st_mode):
+                    if self._type_change_kept(child_src, child_dst):
+                        continue
                     self._archive(child_dst, d_st, src)
                     d_st = None
                 self._sync_link(child_src, child_dst, est, d_st, src)
@@ -773,13 +835,17 @@ class BackupEngine:
                     except OSError:
                         pass
                 continue
-            if self._is_kept(child_dst):
+            if self._is_kept(child_dst) or child_dst in self._root_mirrors \
+                    or child_dst in self._root_ancestors:
                 continue
             d_st = _entry_lstat(dst_entries[name])
             if d_st is None:
                 continue
             if name in excluded_names:
                 stats.newly_excluded += 1
+                if self._defer_shrink and not p.dry:
+                    self._protect(child_dst)
+                    continue
                 self._archive(child_dst, d_st, src, excluded=True)
             else:
                 self._archive(child_dst, d_st, src, removed=True)
@@ -792,6 +858,17 @@ class BackupEngine:
                     stat.S_IMODE(d_now.st_mode) != stat.S_IMODE(sst.st_mode)
                     or abs(d_now.st_mtime_ns - sst.st_mtime_ns) >= self.tolerance_ns):
                 stats.meta_updates += 1
+
+    def _type_change_kept(self, child_src: str, child_dst: str) -> bool:
+        """A folder of the copy that something else still needs (a missing or nested item)
+        is never replaced by a file or a link: it stays, and the new entry waits."""
+        if not self._is_kept(child_dst):
+            return False
+        if self._pass.dry:
+            self._issue(child_src, "Passou de pasta a ficheiro (ou ao contrário). A cópia "
+                                   "anterior foi mantida, porque ainda é precisa, e esta "
+                                   "não foi copiada.")
+        return True
 
     def _sync_loose(self, src: ResolvedSource, dst: str) -> None:
         """Loose files directly in the home folder (folders and dotfiles are handled elsewhere)."""
@@ -1108,12 +1185,20 @@ class BackupEngine:
                 if folder == home_mirror and loose_active and not is_dir \
                         and not entry.name.startswith("."):
                     continue
-                if path in ancestors and is_dir:
-                    stack.append(path)
+                if path in ancestors:
+                    # Above something that stays: never taken out, whatever it is (a link
+                    # left by an earlier run would take the item below with it).
+                    if is_dir:
+                        stack.append(path)
                     continue
                 d_st = _entry_lstat(entry)
+                if d_st is not None and self._defer_shrink and not self._pass.dry:
+                    continue
                 if d_st is not None:
-                    self._archive(path, d_st, None, orphan=True)
+                    try:
+                        self._archive(path, d_st, None, orphan=True)
+                    except EntryError as exc:
+                        self._issue(path, str(exc), "error")
 
     # -------------------------------------------------------------- metadata
     def _apply_dir_meta(self, dpath: str, sst: os.stat_result) -> None:
@@ -1148,6 +1233,8 @@ class BackupEngine:
                                 + fileops.describe_error(exc))
         meta = self.layout.read_meta()
         meta.update(self.meta_extra)
+        if self._defer_shrink and self._previous_app:
+            meta["versao_app"] = self._previous_app  # the window still asks the question
         meta["computador"] = self.layout.computer
         meta["machine_id"] = paths.machine_id()
         meta["atualizado"] = fmt.iso(self._now())

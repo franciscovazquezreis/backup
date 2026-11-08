@@ -14,6 +14,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from . import catalog
 from .layout import HOME_DIR
 
 DEB = "deb"          # distro .deb, Mozilla's own .deb, or a tarball in /opt
@@ -216,10 +217,28 @@ def plan_remaps(app: str, rels: Sequence[str], probe: Probe) -> List[Remap]:
     for remap in result:
         snap = snap_user_dir_problem(remap.destination, probe)
         if snap:
-            remap.warnings.append(
-                "Abre o {0} uma vez e fecha-o antes de restaurar: a pasta ~/snap/{0}/current "
-                "ainda não existe.".format(snap))
+            remap.warnings.append(snap_warning(snap))
     return result
+
+
+def app_label(app: str) -> str:
+    """Name of an app of the catalogue for messages ("Visual Studio Code")."""
+    preset = catalog.PRESETS_BY_ID.get(app)
+    return preset.label if preset is not None else app
+
+
+def snap_label(snap: str) -> str:
+    """Name of the app a snap folder belongs to ("LibreOffice" for ~/snap/libreoffice)."""
+    prefix = "snap/{}/".format(snap)
+    for preset in catalog.PRESETS:
+        if any(path.startswith(prefix) for path in preset.paths):
+            return preset.label
+    return snap
+
+
+def snap_warning(snap: str) -> str:
+    return ("Abre o {} uma vez e fecha-o antes de restaurar: a pasta ~/snap/{}/current "
+            "ainda não existe.".format(snap_label(snap), snap))
 
 
 def snap_user_dir_problem(destination: str, probe: Probe) -> Optional[str]:

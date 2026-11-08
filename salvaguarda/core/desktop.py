@@ -59,6 +59,23 @@ def label(desktop: str) -> str:
     return DESKTOP_LABELS.get(desktop, "outro ambiente de trabalho")
 
 
+# First line of the export written by the backup: which desktop it comes from.
+HEADER_PREFIX = "# salvaguarda-ambiente:"
+
+
+def dump_header(desktop: str) -> str:
+    return "{} {}\n".format(HEADER_PREFIX, desktop or UNKNOWN)
+
+
+def desktop_in_header(text: str) -> Optional[str]:
+    """Desktop recorded in the export itself ("" when unknown), or None without header."""
+    for line in text.splitlines()[:5]:
+        if line.startswith(HEADER_PREFIX):
+            value = line[len(HEADER_PREFIX):].strip()
+            return "" if value == UNKNOWN else value
+    return None
+
+
 def desktop_of_dump(sections: Sequence[Tuple[str, List[str]]]) -> str:
     """Guess the desktop that wrote a dump (disks from version 1.0.0 do not record it)."""
     names = {name for name, _ in sections}
@@ -190,9 +207,11 @@ def path_pairs(old_home: str, new_home: str, old_xdg: Dict[str, str],
     pairs = []
     for key, old in old_xdg.items():
         new = new_xdg.get(key)
-        if not new or not old:
+        # Only folders inside the old home are moved by the restore (see Destinations):
+        # a folder on a data partition (/mnt/dados/Fotos) keeps its place and its paths.
+        if not new or not old or not old.startswith("~/") or len(old) <= 2:
             continue
-        old_abs = old_home + old[1:] if old.startswith("~") else old
+        old_abs = old_home + old[1:]
         if old_home and old_abs != new:
             pairs.append((old_abs, new))
     if old_home and old_home != new_home:
@@ -219,9 +238,13 @@ class DesktopPlan:
     def __init__(self, text: str, source_desktop: str, here: str, home: str,
                  pairs: Sequence[Tuple[str, str]] = (), root: str = "/"):
         self.sections = split_dump(text)
+        recorded = desktop_in_header(text)
+        if recorded is not None:  # the export says where it comes from: trust it first
+            source_desktop = recorded
         self.source = source_desktop or desktop_of_dump(self.sections)
         self.here = here
         self.same_desktop = bool(self.source) and self.source == here
+        self.unknown = not self.source or not here
         self.skipped: List[str] = []
         if not self.same_desktop:
             kept = []
@@ -236,7 +259,12 @@ class DesktopPlan:
 
     def notes(self) -> List[str]:
         notes = []
-        if self.skipped:
+        if self.skipped and self.unknown:
+            notes.append(
+                "Não foi possível confirmar que este computador usa o mesmo ambiente de "
+                "trabalho da cópia: foram aplicadas só as definições das apps. O ficheiro "
+                "completo continua no disco, em «Extras».")
+        elif self.skipped:
             notes.append(
                 "As definições do ambiente de trabalho ({old}) não foram aplicadas, porque "
                 "este computador usa {new}. Foram aplicadas só as definições das apps. O "

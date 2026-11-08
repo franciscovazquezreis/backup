@@ -212,6 +212,10 @@ def resolve(config: Config, candidates: Optional[List[Candidate]] = None) -> Res
                     os.path.join(EXTRAS_DIR, DCONF_EXTRA_NAME), exists=True,
                     version_max_size=max_preset, icon=preset.icon, extra="dconf",
                 ))
+            elif preset.extra == "dconf":
+                # No dconf here (another desktop, a new install): the export already on
+                # the disk is still the only copy of those settings.
+                res.keep.append(os.path.join(EXTRAS_DIR, DCONF_EXTRA_NAME))
         elif cand.kind == KIND_LOOSE:
             raw.append(ResolvedSource(
                 KIND_LOOSE, cand.key, cand.label, paths.home(), HOME_DIR, exists=True,
@@ -258,7 +262,8 @@ def resolve(config: Config, candidates: Optional[List[Candidate]] = None) -> Res
                     break
                 continue
             if paths.is_inside(src.path, other.path) and (
-                    src.path != other.path or full_roots.index(other) < full_roots.index(src)):
+                    src.path != other.path or full_roots.index(other) < full_roots.index(src)) \
+                    and not _through_link(src.path, other.path):
                 container = other
                 break
         if container is not None:
@@ -271,6 +276,23 @@ def resolve(config: Config, candidates: Optional[List[Candidate]] = None) -> Res
         chosen.append(src)
     res.sources = chosen
     return res
+
+
+def _through_link(path: str, container: str) -> bool:
+    """Whether a symbolic link sits between ``container`` and ``path`` (``path`` included).
+
+    The container copies such a link as a link, so what it points to (another folder,
+    another disk, a "stow" dotfiles folder) is only copied by ``path`` as its own root.
+    """
+    rel = os.path.relpath(path, container)
+    if rel in (".", "") or rel.startswith(".."):
+        return False
+    current = container
+    for part in rel.split(os.sep):
+        current = os.path.join(current, part)
+        if os.path.islink(current):
+            return True
+    return False
 
 
 def summary_by_section(candidates: List[Candidate]) -> Dict[str, List[Candidate]]:

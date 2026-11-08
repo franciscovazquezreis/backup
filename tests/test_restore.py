@@ -4,7 +4,7 @@ import stat
 import unittest
 
 from salvaguarda.core import restore
-from salvaguarda.core.config import KIND_PRESET, KIND_PROJECT
+from salvaguarda.core.config import KIND_FOLDER, KIND_PRESET, KIND_PROJECT
 from salvaguarda.core.engine import STATUS_NOTHING, STATUS_OK
 from salvaguarda.core.layout import list_version_runs
 
@@ -286,6 +286,87 @@ class CrossDistroRestoreTests(SandboxTestCase):
         self.assertEqual(os.readlink(os.path.join(new_home, "Documentos", "sistema")), "/usr/bin/env")
         again = restore.RestoreEngine(self.layout.current_dir, items, meta=self.layout.read_meta())
         self.assertEqual(again.run().status, STATUS_NOTHING)
+
+    def test_links_into_a_renamed_personal_folder_follow_it(self):
+        self.write("Documentos/script.sh", "#!/bin/sh", mtime=T0)
+        os.symlink(os.path.join(self.home, "Documentos", "script.sh"),
+                   os.path.join(self.home, "Documentos", "atalho"))
+        self.backup_with_meta()
+        new_home = self.reinstall(english=True)
+        items = [i for i in self.items() if i.xdg_key == "DOCUMENTS"]
+        restore.RestoreEngine(self.layout.current_dir, items, meta=self.layout.read_meta()).run()
+        link = os.path.join(new_home, "Documents", "atalho")
+        self.assertEqual(os.readlink(link), os.path.join(new_home, "Documents", "script.sh"))
+        self.assertTrue(os.path.exists(link))
+
+    def test_old_personal_folder_never_merges_into_another_copied_folder(self):
+        self.write("Documentos/notas.txt", "pt", mtime=T0)
+        self.write("Documents/notas.txt", "en", mtime=T0)
+        self.config.add_path(KIND_FOLDER, os.path.join(self.home, "Documents"))
+        self.backup_with_meta()
+        new_home = self.reinstall(english=True)
+        items = [i for i in self.items() if i.xdg_key == "DOCUMENTS" or i.kind == KIND_FOLDER]
+        self.assertEqual(len(items), 2)
+        meta = self.layout.read_meta()
+        result = restore.RestoreEngine(self.layout.current_dir, items, meta=meta).run()
+        self.assertEqual(result.status, STATUS_OK, result.message)
+        self.assertEqual(read(os.path.join(new_home, "Documents", "notas.txt")), "en")
+        self.assertEqual(read(os.path.join(new_home, "Documentos", "notas.txt")), "pt")
+        again = restore.RestoreEngine(self.layout.current_dir, items, meta=meta).run()
+        self.assertEqual(again.status, STATUS_NOTHING)
+
+    def test_snap_that_never_ran_gets_no_real_current_folder(self):
+        self.write("snap/libreoffice/x5/.config/libreoffice/registo.xcu", "r", mtime=T0)
+        os.symlink("x5", os.path.join(self.home, "snap", "libreoffice", "current"))
+        self.config.set_enabled(KIND_PRESET, "libreoffice", True)
+        self.backup_with_meta()
+        new_home = self.reinstall()
+        current = os.path.join(new_home, "snap", "libreoffice", "current")
+        items = [i for i in self.items() if i.key == "libreoffice"]
+        warnings = restore.snap_warnings(items, {})
+        self.assertTrue(any("LibreOffice" in w for w in warnings.values()), warnings)
+        result = restore.RestoreEngine(self.layout.current_dir, items,
+                                       meta=self.layout.read_meta()).run()
+        self.assertFalse(os.path.lexists(current))
+        self.assertTrue(any("LibreOffice" in i.message for i in result.issues))
+        # Once the snap ran, the profile goes through the link snapd made.
+        os.makedirs(os.path.join(new_home, "snap", "libreoffice", "x7"))
+        os.symlink("x7", current)
+        self.assertEqual(restore.snap_warnings(items, {}), {})
+        result = restore.RestoreEngine(self.layout.current_dir, items,
+                                       meta=self.layout.read_meta()).run()
+        self.assertEqual(result.status, STATUS_OK, result.message)
+        self.assertTrue(os.path.islink(current))
+        self.assertEqual(read(os.path.join(new_home, "snap/libreoffice/x7/.config/libreoffice/"
+                                                     "registo.xcu")), "r")
+
+    def test_restore_goes_through_a_link_to_a_folder(self):
+        """Dotfiles kept with stow: ~/.config/app is a link to ~/dotfiles/app."""
+        self.write(".config/minhaapp/config.toml", "[tools]", mtime=T0)
+        self.config.add_path(KIND_FOLDER, os.path.join(self.home, ".config", "minhaapp"))
+        self.backup_with_meta()
+        new_home = self.reinstall()
+        os.makedirs(os.path.join(new_home, "dotfiles", "minhaapp"))
+        os.symlink(os.path.join(new_home, "dotfiles", "minhaapp"),
+                   os.path.join(new_home, ".config", "minhaapp"))
+        items = [i for i in self.items() if i.kind == KIND_FOLDER]
+        result = restore.RestoreEngine(self.layout.current_dir, items,
+                                       meta=self.layout.read_meta()).run()
+        self.assertEqual(result.status, STATUS_OK, result.message)
+        self.assertTrue(os.path.islink(os.path.join(new_home, ".config", "minhaapp")))
+        self.assertEqual(read(os.path.join(new_home, "dotfiles", "minhaapp", "config.toml")), "[tools]")
+
+    def test_saved_copies_never_overwrite_each_other(self):
+        new_home = self.reinstall()
+        engine = restore.RestoreEngine(self.layout.current_dir, [])
+        path = os.path.join(new_home, "nota.txt")
+        for text in ("1", "2", "3"):
+            with open(path, "w") as fh:
+                fh.write(text)
+            engine._move_aside(path)
+        folder = os.path.join(engine.replaced_dir)
+        saved = sorted(read(os.path.join(dp, f)) for dp, _, fs in os.walk(folder) for f in fs)
+        self.assertEqual(saved, ["1", "2", "3"])
 
     def test_project_inside_a_personal_folder_follows_the_new_language(self):
         project = os.path.join(self.home, "Documentos", "app")

@@ -49,6 +49,10 @@ class _TerminalCallbacks(Callbacks):
         for item in question.details:
             print("  - " + item)
         if not self.interactive:
+            if question.unattended:
+                print("(sem terminal interativo: a cópia continua e estes itens ficam na "
+                      "«Cópia atual» até decidires na janela da Salvaguarda)")
+                return question.unattended
             print("(sem terminal interativo: a opção segura foi escolhida)")
             return question.options[0][0]
         for index, (_, label) in enumerate(question.options, 1):

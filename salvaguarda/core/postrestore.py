@@ -15,7 +15,7 @@ import fnmatch
 import os
 import re
 import shutil
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 SHELL_FILES = (".bashrc", ".bash_profile", ".bash_aliases", ".profile", ".zshrc", ".zprofile",
                ".zshenv", ".config/fish/config.fish")
@@ -27,8 +27,16 @@ SETTINGS_FILES = (".ssh/config", ".gitconfig", ".config/git/config", ".npmrc",
                   ".config/Cursor/User/settings.json", ".claude.json") + SHELL_FILES
 
 
-def relink(target: str, old_home: str, new_home: str) -> str:
-    if not old_home or old_home == new_home or not os.path.isabs(target):
+def relink(target: str, old_home: str, new_home: str,
+           pairs: Sequence[Tuple[str, str]] = ()) -> str:
+    """``pairs`` are (old, new) folders the restore really moved (an XDG folder with
+    another name here), tried before the home folder itself, longest first."""
+    if not os.path.isabs(target):
+        return target
+    for old, new in sorted(pairs, key=lambda p: len(p[0]), reverse=True):
+        if old and (target == old or target.startswith(old + "/")):
+            return new + target[len(old):]
+    if not old_home or old_home == new_home:
         return target
     if target == old_home or target.startswith(old_home + "/"):
         return new_home + target[len(old_home):]

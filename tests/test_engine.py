@@ -393,6 +393,106 @@ class SelectionBehaviourTests(SandboxTestCase):
         self.assertEqual(read(self.mirror("notas/importante.md")), "# nota")
 
 
+class SymlinkedSourceTests(SandboxTestCase):
+    """Selected folders reached through a symbolic link (stow dotfiles, another disk,
+    snap "current") keep their content in «Cópia atual», whatever else is selected."""
+
+    def snapshot(self, folder: str):
+        out = {}
+        for dirpath, dirnames, filenames in os.walk(folder):
+            for name in dirnames + filenames:
+                st = os.lstat(os.path.join(dirpath, name))
+                out[os.path.join(dirpath, name)] = (st.st_mtime_ns, st.st_size)
+        return out
+
+    def test_stow_link_inside_a_selected_folder(self):
+        self.write("dotfiles/mise/config.toml", "[tools]", mtime=T0)
+        os.symlink(os.path.join(self.home, "dotfiles", "mise"),
+                   os.path.join(self.home, ".config", "mise"))
+        mise = os.path.join(self.home, ".config", "mise")
+        self.config.add_path(KIND_FOLDER, mise)
+        self.assertEqual(self.backup().status, STATUS_OK)
+        self.assertEqual(read(self.mirror(".config/mise/config.toml")), "[tools]")
+        self.config.add_path(KIND_FOLDER, os.path.join(self.home, ".config"))
+        res = selection.resolve(self.config)
+        self.assertIn(mise, [s.path for s in res.sources])
+        result = self.backup()
+        self.assertEqual(result.status, STATUS_OK)
+        self.assertEqual(result.stats.archived, 0)
+        self.assertFalse(os.path.islink(self.mirror(".config/mise")))
+        self.assertEqual(read(self.mirror(".config/mise/config.toml")), "[tools]")
+        self.assertEqual(self.backup().status, STATUS_NOTHING)
+
+    def test_documents_on_another_partition_with_the_whole_home(self):
+        data = os.path.join(self.tmp, "dados", "Documentos")
+        os.makedirs(data)
+        with open(os.path.join(data, "tese.odt"), "w") as fh:
+            fh.write("tese")
+        os.rmdir(os.path.join(self.home, "Documentos"))
+        os.symlink(data, os.path.join(self.home, "Documentos"))
+        self.backup()
+        self.assertEqual(read(self.mirror("Documentos/tese.odt")), "tese")
+        self.config.add_path(KIND_FOLDER, self.home)
+        result = self.backup()
+        self.assertEqual(result.status, STATUS_OK)
+        self.assertEqual(result.stats.archived, 0)
+        self.assertEqual(read(self.mirror("Documentos/tese.odt")), "tese")
+
+    def snap(self) -> None:
+        x5 = os.path.join(self.home, "snap", "libreoffice", "x5")
+        self.write("snap/libreoffice/x5/.config/libreoffice/registo.xcu", "r", mtime=T0)
+        self.write("snap/libreoffice/x5/outro.txt", "o", mtime=T0)
+        os.symlink("x5", os.path.join(os.path.dirname(x5), "current"))
+
+    def test_snap_profile_while_the_snap_folder_is_turned_on_and_off(self):
+        self.snap()
+        self.config.set_enabled(KIND_PRESET, "libreoffice", True)
+        kept = self.mirror("snap/libreoffice/current/.config/libreoffice/registo.xcu")
+        self.backup()
+        self.assertEqual(read(kept), "r")
+        snap = os.path.join(self.home, "snap")
+        self.config.add_path(KIND_FOLDER, snap)
+        self.assertEqual(self.backup().status, STATUS_OK)
+        self.assertEqual(read(kept), "r")
+        self.assertEqual(read(self.mirror("snap/libreoffice/x5/outro.txt")), "o")
+        self.config.remove(KIND_FOLDER, "~/snap")
+        self.assertEqual(self.backup().status, STATUS_OK)
+        self.assertEqual(read(kept), "r")
+        self.assertEqual(self.backup().status, STATUS_NOTHING)
+
+    def test_link_left_in_the_mirror_is_never_written_through(self):
+        self.snap()
+        self.config.set_enabled(KIND_PRESET, "libreoffice", True)
+        self.backup()
+        current = self.mirror("snap/libreoffice/current")
+        fileops.force_remove(current)
+        # As left by an older version: a link that points back to the computer.
+        os.symlink(os.path.join(self.home, "snap", "libreoffice", "x5"), current)
+        self.write("snap/libreoffice/x5/.config/libreoffice/novo.xcu", "n", mtime=T0)
+        before = self.snapshot(os.path.join(self.home, "snap"))
+        result = self.backup()
+        self.assertEqual(result.status, STATUS_OK)
+        self.assertEqual(self.snapshot(os.path.join(self.home, "snap")), before)
+        self.assertFalse(os.path.islink(current))
+        self.assertEqual(read(os.path.join(current, ".config/libreoffice/novo.xcu")), "n")
+        self.assertEqual(len(self.find_in_versions("snap/libreoffice/current")), 1)
+
+    def test_missing_item_below_a_link_in_the_mirror_stays(self):
+        self.snap()
+        self.config.set_enabled(KIND_PRESET, "libreoffice", True)
+        self.backup()
+        current = self.mirror("snap/libreoffice/current")
+        fileops.force_remove(current)
+        os.symlink("x5", current)
+        os.makedirs(self.mirror("snap/libreoffice/x5/.config/libreoffice"))
+        with open(self.mirror("snap/libreoffice/x5/.config/libreoffice/registo.xcu"), "w") as fh:
+            fh.write("r")
+        fileops.force_remove(os.path.join(self.home, "snap"))  # snap removed
+        result = self.backup()
+        self.assertIn(result.status, (STATUS_OK, STATUS_WARNINGS, STATUS_NOTHING))
+        self.assertTrue(os.path.islink(current))
+
+
 class ExclusionBehaviourTests(SandboxTestCase):
     def setUp(self):
         super().setUp()
@@ -478,6 +578,32 @@ class UpgradeSafetyTests(SandboxTestCase):
         self.assertEqual(len(self.find_in_versions(".codex/log/codex-tui.log")), 1)
         self.assertTrue(os.path.exists(self.mirror(".codex/config.toml")))
 
+    def test_unattended_run_after_an_upgrade_keeps_copying(self):
+        """A keyboard shortcut (salvaguarda --copiar, no terminal) is never blocked."""
+        from salvaguarda.cli import _TerminalCallbacks
+
+        self.write(".codex/config.toml", "model = 'x'", mtime=T0)
+        self.write(".codex/log/codex-tui.log", "log", mtime=T0)
+        self.config.set_enabled(KIND_PRESET, "ai", True)
+        self.config.settings.exclude_caches = False
+        self.backup(meta_extra={"versao_app": "1.0.0"})
+        self.config.settings.exclude_caches = True
+        self.write("Documentos/novo.txt", "n", mtime=T0)
+        with mock.patch("sys.stdout"):
+            result = self.backup(_TerminalCallbacks(False), meta_extra={"versao_app": "1.1.0"})
+        self.assertEqual(result.status, STATUS_OK, result.message)
+        self.assertEqual(read(self.mirror("Documentos/novo.txt")), "n")
+        self.assertTrue(os.path.exists(self.mirror(".codex/log/codex-tui.log")))
+        self.assertEqual(self.find_in_versions(".codex/log/codex-tui.log"), [])
+        self.assertTrue(any("Abre a Salvaguarda" in n for n in result.notes))
+        self.assertEqual(self.layout.read_meta()["versao_app"], "1.0.0")
+        cb = RecordingCallbacks({"upgrade_shrink": "continue"})
+        self.assertEqual(self.backup(cb, meta_extra={"versao_app": "1.1.0"}).status, STATUS_OK)
+        self.assertEqual([q.kind for q in cb.questions], ["upgrade_shrink"])
+        self.assertIn("1 item deixa de ser copiado", cb.questions[0].text)
+        self.assertFalse(os.path.exists(self.mirror(".codex/log/codex-tui.log")))
+        self.assertEqual(self.layout.read_meta()["versao_app"], "1.1.0")
+
     def test_same_version_with_new_exclusion_does_not_ask(self):
         self.write("Projetos/app/node_modules/x.js", "x", mtime=T0)
         self.config.add_path(KIND_PROJECT, os.path.join(self.home, "Projetos"))
@@ -539,6 +665,26 @@ class DconfExtraTests(SandboxTestCase):
         self.assertEqual(result.status, STATUS_OK, result.message)
         extra = os.path.join(self.layout.current_dir, "Extras", selection.DCONF_EXTRA_NAME)
         self.assertIn("panels-enabled", read(extra))
+        # A new system without the dconf program: the export on the disk stays.
+        result = self.backup(dconf_dump=fake_dump)
+        self.assertIn(result.status, (STATUS_OK, STATUS_NOTHING), result.message)
+        self.assertIn("panels-enabled", read(extra))
+        self.assertEqual(result.stats.orphans, 0)
+
+    def test_export_records_the_desktop_it_comes_from(self):
+        from salvaguarda.core import controller, desktop
+
+        self.config.set_enabled(KIND_PRESET, "desktop", True)
+        written = []
+        engine = None
+        with mock.patch("salvaguarda.core.selection._dconf_available", return_value=True), \
+                mock.patch("salvaguarda.core.system.dconf_dump",
+                           side_effect=lambda t, header="": written.append(header) or "x"), \
+                mock.patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "X-Cinnamon"}):
+            engine = controller.build_engine(self.config, self.root, RecordingCallbacks(),
+                                             threading.Event())
+            engine.dconf_dump("/nao/existe")
+        self.assertEqual(written, [desktop.dump_header(desktop.CINNAMON)])
 
 
 if __name__ == "__main__":
