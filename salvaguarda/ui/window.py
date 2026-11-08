@@ -18,6 +18,7 @@ from .backup_page import BackupPage  # noqa: E402
 from .dialogs import HistoryDialog, PreferencesDialog, SelectionDialog, about  # noqa: E402
 from .disks import DiskMonitor  # noqa: E402
 from .onboarding import Onboarding  # noqa: E402
+from .projects_service import ProjectScanner  # noqa: E402
 from .restore_page import RestorePage  # noqa: E402
 
 
@@ -36,6 +37,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 self.set_icon(pixbuf)
         self.config = cfgmod.load()
         self.disks = DiskMonitor()
+        self.projects = ProjectScanner(lambda: self.config)
         self.disks.connect("changed", lambda *_: self.refresh())
         self._inhibit_cookie = 0
         self._busy = 0
@@ -84,6 +86,8 @@ class MainWindow(Gtk.ApplicationWindow):
 
         self.onboarding: Optional[Onboarding] = None
         self.connect("delete-event", self._on_delete)
+        self.projects.connect("updated", lambda *_: self.backup_page.refresh())
+        self.connect("destroy", lambda *_: self.projects.stop())
         self.show_all()
         if self.config.configured and self.config.destinations:
             self._show_pages()
@@ -92,6 +96,8 @@ class MainWindow(Gtk.ApplicationWindow):
 
     # ------------------------------------------------------------ navigation
     def _show_pages(self) -> None:
+        # Look for projects outside the copy a moment after the window appears.
+        GLib.timeout_add(2000, lambda: self.projects.request() and False)
         self.header.set_custom_title(self.switcher)
         self.switcher.show_all()
         self.menu_button.set_visible(True)
@@ -172,8 +178,10 @@ class MainWindow(Gtk.ApplicationWindow):
         dialog = SelectionDialog(self)
         if dialog.run() == Gtk.ResponseType.OK:
             self.config.sources = dialog.working.sources
+            self.config.settings.ignored_projects = dialog.working.settings.ignored_projects
             self.save_config()
         dialog.destroy()
+        self.projects.recompute(self.config)
         self.refresh()
 
     def edit_preferences(self) -> None:

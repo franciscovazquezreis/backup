@@ -11,7 +11,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import GLib, GObject, Gtk, Pango  # noqa: E402
 
-from ..core import catalog, controller, fmt, paths, selection  # noqa: E402
+from ..core import catalog, controller, fmt, paths, projects, selection  # noqa: E402
 from ..core.config import KIND_FOLDER, KIND_LOOSE, KIND_PRESET, KIND_PROJECT, Config  # noqa: E402
 from ..core.measure import measure  # noqa: E402
 from . import common  # noqa: E402
@@ -80,11 +80,17 @@ class _SizeWorker:
 class SelectionWidget(Gtk.Box):
     __gsignals__ = {"changed": (GObject.SignalFlags.RUN_LAST, None, ())}
 
-    def __init__(self, config: Config, window_getter, destination_roots: Optional[List[str]] = None):
+    def __init__(self, config: Config, window_getter, destination_roots: Optional[List[str]] = None,
+                 scanner=None):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=18)
         self.config = config
         self._window = window_getter
         self.destination_roots = destination_roots or []
+        self.scanner = scanner
+        self.outside_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        if scanner is not None:
+            handler = scanner.connect("updated", lambda *_: self._fill_outside())
+            self.connect("destroy", lambda *_: scanner.disconnect(handler))
         self._sizes: Dict[Tuple[str, str], Optional[Tuple[int, int]]] = {}
         self._size_labels: Dict[Tuple[str, str], Gtk.Label] = {}
         self._candidates: List[selection.Candidate] = []
@@ -109,13 +115,17 @@ class SelectionWidget(Gtk.Box):
             "Ficam tal e qual: as mesmas pastas, com as mesmas datas e permissões.",
             by_section.get(selection.SECTION_PERSONAL, []),
         )
-        projects = self._add_section(
+        projects_box = self._add_section(
             "Projetos de programação", PROJECTS_HELP,
             by_section.get(selection.SECTION_PROJECTS, []),
             empty_text="Ainda não há pastas de projetos. Adiciona a pasta onde guardas os teus projetos.",
         )
-        projects.pack_start(self._add_button("Adicionar pasta de projetos…", self._add_project),
-                            False, False, 0)
+        projects_box.pack_start(self._add_button("Adicionar pasta de projetos…", self._add_project),
+                                False, False, 0)
+        # A fresh box each time: clearing the page destroys the old one with its section.
+        self.outside_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        projects_box.pack_start(self.outside_box, False, False, 6)
+        self._fill_outside()
         self._add_presets(by_section.get(selection.SECTION_PRESETS, []))
         others = self._add_section(
             "Outras pastas e ficheiros",
@@ -215,6 +225,124 @@ class SelectionWidget(Gtk.Box):
         if cand.exists:
             self._request_size(cand)
         return lrow
+
+    # ------------------------------------------------- projects outside the copy
+    def _fill_outside(self) -> None:
+        box = self.outside_box
+        common.clear(box)
+        scanner = self.scanner
+        if scanner is None or not self.config.settings.find_projects:
+            return
+        result = scanner.result
+        if result is None:
+            if scanner.running:
+                spinner = Gtk.Spinner()
+                spinner.start()
+                box.pack_start(common.hbox(8, spinner, common.label(
+                    "A procurar projetos na pasta pessoal…", ("sg-dim", "sg-small"))), False, False, 0)
+            box.show_all()
+            return
+        scanner.recompute(self.config)
+        at_risk = controller.projects_at_risk(self.config, result)
+        only_here = controller.projects_only_here(self.config, result)
+        if at_risk:
+            box.pack_start(common.label("Projetos fora da cópia", ("sg-heading",)), False, False, 0)
+            box.pack_start(common.label(
+                "Estes projetos estão em pastas que não vão para a cópia. Não estão no GitHub, "
+                "ou têm trabalho por enviar, por isso só existem neste computador.",
+                ("sg-dim", "sg-small"), wrap=True, max_chars=70), False, False, 0)
+            listbox = common.boxed_list()
+            for project in at_risk:
+                listbox.add(self._project_row(project, actions=True))
+            box.pack_start(listbox, False, False, 2)
+        else:
+            box.pack_start(common.label(
+                "Não há projetos fora da cópia com trabalho que só exista neste computador.",
+                ("sg-dim", "sg-small"), wrap=True), False, False, 0)
+        if only_here:
+            expander = Gtk.Expander(label=fmt.agree(
+                len(only_here), "1 projeto só existe neste computador e na cópia",
+                "{} projetos só existem neste computador e na cópia".format(len(only_here))))
+            inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            inner.set_margin_top(6)
+            inner.pack_start(common.label(
+                "Já vão para a cópia, mas não estão no GitHub nem noutro remoto. Se este "
+                "computador e o disco das cópias se estragarem, perdem-se. Envia-os para o "
+                "GitHub ou faz cópias com frequência.", ("sg-dim", "sg-small"), wrap=True,
+                max_chars=70), False, False, 0)
+            listbox = common.boxed_list()
+            for project in only_here[:50]:
+                listbox.add(self._project_row(project, actions=False))
+            inner.pack_start(listbox, False, False, 0)
+            expander.add(inner)
+            box.pack_start(expander, False, False, 0)
+        footer = self._search_footer(result)
+        refresh = Gtk.Button.new_with_mnemonic("Procurar _outra vez")
+        refresh.set_relief(Gtk.ReliefStyle.NONE)
+        refresh.set_sensitive(not scanner.running)
+        refresh.connect("clicked", lambda *_: scanner.request(force=True))
+        line = common.hbox(8, common.label(footer, ("sg-dim", "sg-small"), wrap=True, max_chars=60))
+        line.pack_end(refresh, False, False, 0)
+        box.pack_start(line, False, False, 0)
+        box.show_all()
+
+    def _search_footer(self, result: projects.ScanResult) -> str:
+        parts = ["Procura feita em {} ({}).".format(
+            fmt.plural(result.dirs, "pasta", "pastas"),
+            fmt.duration(result.walk_seconds + result.git_seconds))]
+        if result.other_filesystems:
+            parts.append("Não foi possível procurar em: {} (outro disco).".format(
+                ", ".join(paths.display_path(p) for p in result.other_filesystems[:3])))
+        if result.network_skipped:
+            parts.append("{} (pasta de rede).".format(
+                ", ".join(paths.display_path(p) for p in result.network_skipped[:3])))
+        if result.truncated:
+            parts.append("A procura parou antes do fim: a pasta pessoal é muito grande.")
+        if result.too_deep_count:
+            parts.append("{} ficaram de fora por estarem muito fundas.".format(
+                fmt.plural(result.too_deep_count, "pasta", "pastas")))
+        if not result.git_available:
+            parts.append("O git não está instalado: não é possível saber o que falta enviar.")
+        return " ".join(parts)
+
+    def _project_row(self, project: projects.Project, actions: bool) -> Gtk.ListBoxRow:
+        reasons = projects.reasons(project)
+        lines = [paths.safe_text(paths.display_path(project.path))]
+        suffix = None
+        if actions:
+            buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+            if project.blocked:
+                lines.append("Está numa pasta temporária que o sistema apaga. Move o projeto "
+                             "para a pasta pessoal.")
+            elif project.excluded_by:
+                lines.append("Está numa pasta copiada, mas a exclusão «{}» deixa-o de fora. "
+                             "Podes mudar as exclusões nas Definições.".format(project.excluded_by))
+            else:
+                text = "Adicionar o projeto todo" if project.partial else "Adicionar"
+                if project.partial:
+                    lines.append("Só uma parte deste projeto vai para a cópia.")
+                add = Gtk.Button.new_with_label(text)
+                add.set_tooltip_text("Passa a ir para a cópia, como projeto de programação")
+                add.connect("clicked", lambda *_: self._add(KIND_PROJECT, project.path))
+                buttons.pack_start(add, False, False, 0)
+            ignore = Gtk.Button.new_from_icon_name("window-close-symbolic", Gtk.IconSize.BUTTON)
+            ignore.set_relief(Gtk.ReliefStyle.NONE)
+            ignore.set_tooltip_text("Não voltar a avisar sobre este projeto")
+            ignore.connect("clicked", lambda *_: self._ignore_project(project.path))
+            buttons.pack_start(ignore, False, False, 0)
+            suffix = buttons
+        if reasons:
+            lines.append(" · ".join(reasons))
+        icon = "emblem-shared-symbolic" if project.kind != projects.KIND_FOLDER else "folder-symbolic"
+        name = os.path.basename(project.path.rstrip(os.sep)) or project.path
+        return common.row(paths.safe_text(name), "\n".join(lines), icon, suffix)
+
+    def _ignore_project(self, path: str) -> None:
+        key = paths.to_portable(path)
+        if key not in self.config.settings.ignored_projects:
+            self.config.settings.ignored_projects.append(key)
+        self._fill_outside()
+        self.emit("changed")
 
     # ------------------------------------------------------------------ sizes
     def _request_size(self, cand: selection.Candidate) -> None:

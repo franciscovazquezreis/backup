@@ -55,6 +55,9 @@ class BackupPage(Gtk.Stack):
 
         box.pack_start(self._disk_card(connected), False, False, 0)
         box.pack_start(self._last_backup_card(connected), False, False, 0)
+        projects_card = self._projects_card()
+        if projects_card is not None:
+            box.pack_start(projects_card, False, False, 0)
         box.pack_start(self._selection_card(), False, False, 0)
 
         button = Gtk.Button.new_with_mnemonic("_Fazer cópia agora")
@@ -190,6 +193,54 @@ class BackupPage(Gtk.Stack):
                 box.pack_end(button, False, False, 0)
         return common.card(box)
 
+    def _projects_card(self) -> Optional[Gtk.Widget]:
+        """Projects with work that is on no remote: outside the copy (warning) or only in it."""
+        scanner = self.window.projects
+        config = self.window.config
+        if not scanner.enabled or scanner.result is None:
+            return None
+        scanner.recompute(config)
+        at_risk = controller.projects_at_risk(config, scanner.result)
+        only_here = controller.projects_only_here(config, scanner.result)
+        if not at_risk and not only_here:
+            return None
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
+        texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        texts.set_valign(Gtk.Align.CENTER)
+        if at_risk:
+            names = common.join_names([os.path.basename(p.path.rstrip(os.sep)) for p in at_risk])
+            count = len(at_risk)
+            box.pack_start(common.icon("dialog-warning-symbolic", 32, ("sg-warning",)), False, False, 0)
+            texts.pack_start(common.label(fmt.agree(
+                count, "1 projeto com trabalho que não está na cópia",
+                "{} projetos com trabalho que não está na cópia".format(count)),
+                ("sg-heading",), wrap=True), False, False, 0)
+            texts.pack_start(common.label(fmt.agree(
+                count, "Não está no GitHub (ou tem alterações por enviar) e a pasta onde está "
+                       "não é copiada: {}.",
+                "Não estão no GitHub (ou têm alterações por enviar) e as pastas onde estão não "
+                "são copiadas: {}.").format(paths.safe_text(names)), ("sg-dim",), wrap=True),
+                False, False, 0)
+            box.pack_start(texts, True, True, 0)
+            button = Gtk.Button.new_with_mnemonic("_Ver…")
+            button.set_valign(Gtk.Align.CENTER)
+            button.connect("clicked", lambda *_: self.window.edit_selection())
+            box.pack_end(button, False, False, 0)
+        else:
+            count = len(only_here)
+            box.pack_start(common.icon("dialog-information-symbolic", 32, ("sg-dim",)), False, False, 0)
+            texts.pack_start(common.label(fmt.agree(
+                count, "1 projeto só existe neste computador e na cópia",
+                "{} projetos só existem neste computador e na cópia".format(count)),
+                ("sg-heading",), wrap=True), False, False, 0)
+            texts.pack_start(common.label(fmt.agree(
+                count, "Não está no GitHub nem noutro remoto. Faz cópias com frequência ou "
+                       "envia-o para o GitHub.",
+                "Não estão no GitHub nem noutro remoto. Faz cópias com frequência ou envia-os "
+                "para o GitHub."), ("sg-dim",), wrap=True), False, False, 0)
+            box.pack_start(texts, True, True, 0)
+        return common.card(box)
+
     def _selection_card(self) -> Gtk.Widget:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -278,6 +329,7 @@ class BackupPage(Gtk.Stack):
                 self.start_backup()
                 return
         self.window.notify_done(STATUS_TITLES.get(result.status, ""), result.message)
+        self.window.projects.request(force=True)
         buttons = []
         if result.status in (STATUS_OK, STATUS_WARNINGS, STATUS_NOTHING) and root is not None:
             mount = self.window.disks.mount_for_path(root)

@@ -357,6 +357,9 @@ class RestorePage(Gtk.Stack):
 
     def _show_size(self, labels, index, files, size, cancel) -> bool:
         if not cancel.is_set() and index in labels:
+            if not self.items[index].rels if index < len(self.items) else False:
+                labels[index].set_text("")  # only settings: nothing to measure
+                return False
             labels[index].set_text(fmt.size(size) if files else "vazio")
             labels[index].set_tooltip_text(fmt.files(files))
         return False

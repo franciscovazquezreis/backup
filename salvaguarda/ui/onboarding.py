@@ -136,7 +136,9 @@ class Onboarding(Gtk.Stack):
             "Já deixei marcado o que costuma interessar. Podes mudar isto quando quiseres em "
             "«Alterar…», na página principal.", ("sg-dim",), wrap=True, max_chars=70), False, False, 0)
         roots = [d.path for d in self.window.config.destinations]
-        self.selection = SelectionWidget(self.window.config, lambda: self.window, roots)
+        self.selection = SelectionWidget(self.window.config, lambda: self.window, roots,
+                                         self.window.projects)
+        self.window.projects.request()
         box.pack_start(self.selection, False, False, 0)
         nav = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         back = Gtk.Button.new_with_mnemonic("_Voltar")

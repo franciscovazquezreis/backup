@@ -50,6 +50,8 @@ class Settings:
     warn_open_apps: bool = True
     remind_after_days: int = 7  # 0 = never
     save_inventory: bool = True  # list of installed programs in Extras (added in 1.1.0)
+    find_projects: bool = True  # look for projects outside the copy (added in 1.1.0)
+    ignored_projects: List[str] = field(default_factory=list)  # portable paths not to warn about
 
 
 @dataclass

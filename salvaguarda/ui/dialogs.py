@@ -198,7 +198,8 @@ class SelectionDialog(Gtk.Dialog):
         common.add_classes(save, "suggested-action")
         self.working = Config.from_dict(window.config.to_dict())
         roots = [c.root for c in window.connected_all()] + [d.path for d in window.config.destinations]
-        self.selector = SelectionWidget(self.working, lambda: self, roots)
+        self.selector = SelectionWidget(self.working, lambda: self, roots, window.projects)
+        window.projects.request()
         area = self.get_content_area()
         scroller = common.scrolled_page(self.selector, 640)
         scroller.set_vexpand(True)
@@ -322,6 +323,17 @@ class PreferencesDialog(Gtk.Dialog):
                                "Para os voltares a instalar noutro sistema: pacotes, snaps, "
                                "Flatpaks, ferramentas de programação, modelos de IA e extensões "
                                "dos editores.", None, self.inventory_switch))
+        self.projects_switch = Gtk.Switch()
+        self.projects_switch.set_active(s.find_projects)
+        listbox.add(common.row("Procurar projetos fora da cópia",
+                               "Avisa quando há projetos de programação com trabalho que não está "
+                               "no GitHub e que não vão para a cópia. Nada é enviado para a internet.",
+                               None, self.projects_switch))
+        if s.ignored_projects:
+            reset = Gtk.Button.new_with_label("Voltar a avisar")
+            reset.connect("clicked", lambda b: (s.ignored_projects.clear(), b.set_sensitive(False)))
+            listbox.add(common.row("Projetos ignorados: {}".format(len(s.ignored_projects)),
+                                   ", ".join(s.ignored_projects[:5]), None, reset))
         self.apps_switch = Gtk.Switch()
         self.apps_switch.set_active(s.warn_open_apps)
         listbox.add(common.row("Avisar se o navegador ou o e-mail estiverem abertos",
@@ -388,6 +400,7 @@ class PreferencesDialog(Gtk.Dialog):
         s.custom_excludes = validate_custom(text.splitlines())
         s.copy_app_to_disk = self.app_switch.get_active()
         s.save_inventory = self.inventory_switch.get_active()
+        s.find_projects = self.projects_switch.get_active()
         s.warn_open_apps = self.apps_switch.get_active()
         s.remind_after_days = int(self.remind_combo.get_active_id() or 7)
         name = self.name_entry.get_text().strip()

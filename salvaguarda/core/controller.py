@@ -8,7 +8,8 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from .. import VERSION
-from . import desktop, fmt, fsinfo, inventory, paths, portable, report, selection, system
+from . import (desktop, fmt, fsinfo, inventory, paths, portable, projects, report, selection,
+               system)
 from .config import Config, Destination
 from .engine import BackupEngine, Callbacks, RunResult, STATUS_FAILED, STATUS_CANCELLED
 from .exclusions import Exclusions, validate_custom
@@ -115,6 +116,39 @@ def build_engine(config: Config, root: str, callbacks: Callbacks,
         callbacks=callbacks,
         cancel_event=cancel_event,
     )
+
+
+def scan_projects(config: Config, cancel: Optional[threading.Event] = None,
+                  progress=None) -> projects.ScanResult:
+    """Look for programming projects and tell which ones the copy does not hold.
+
+    Takes a few seconds on a big home folder: call it from a worker thread.
+    """
+    resolution = selection.resolve(config)
+    return projects.find_projects(projects.coverage_roots(resolution),
+                                  projects.search_roots(resolution), make_exclusions(config),
+                                  cancel=cancel, progress=progress)
+
+
+def refresh_coverage(config: Config, result: projects.ScanResult) -> None:
+    """Recompute what is covered after the selection changed (no new search, no git)."""
+    resolution = selection.resolve(config)
+    projects.apply_coverage(result.projects, projects.coverage_roots(resolution),
+                            make_exclusions(config))
+
+
+def projects_at_risk(config: Config, result: projects.ScanResult) -> List[projects.Project]:
+    """Projects with work that exists only on this computer and is not in the copy."""
+    ignored = set(config.settings.ignored_projects)
+    return [p for p in result.projects
+            if projects.level(p) in (projects.LEVEL_LOCAL, projects.LEVEL_IGNORED)
+            and not projects.in_backup(p) and paths.to_portable(p.path) not in ignored]
+
+
+def projects_only_here(config: Config, result: projects.ScanResult) -> List[projects.Project]:
+    """Projects in the copy whose work is on no remote: the copy is their only other place."""
+    return [p for p in result.projects
+            if projects.level(p) == projects.LEVEL_LOCAL and projects.in_backup(p)]
 
 
 def after_backup(config: Config, dest: Destination, root: str, result: RunResult) -> List[str]:
