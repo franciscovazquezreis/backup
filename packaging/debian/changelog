@@ -3,10 +3,17 @@ salvaguarda (1.1.0) unstable; urgency=medium
   * Atualização por cima da versão anterior sem perder nada: a configuração
     guarda chaves de versões mais recentes, o histórico tolera formatos
     diferentes, a cópia da app no disco nunca volta a uma versão anterior e,
-    se a app estiver aberta durante a atualização, propõe reiniciar.
+    nas atualizações seguintes, se a app estiver aberta, propõe reiniciar
+    (para passar da 1.0.0 para esta, fecha a app antes de instalar).
   * Primeira cópia depois de atualizar: pergunta antes de tirar alguma coisa
-    da «Cópia atual»; discos preparados por uma versão mais recente são
-    recusados em vez de mal interpretados.
+    da «Cópia atual» (sem terminal, mantém tudo e a cópia continua); discos
+    preparados por uma versão mais recente são recusados em vez de mal
+    interpretados.
+  * Pastas selecionadas que são ligações simbólicas (stow, outra partição,
+    snap) ficam sempre com o conteúdo na cópia; o restauro nunca cria
+    ~/snap/<app>/current como pasta real e segue ligações que já existam.
+  * Procura de projetos fora da cópia: repositórios com filtros do git que
+    não se conseguem desligar não são verificados.
   * Ficheiros apagados de configurações de apps ficam sempre em «Versões
     anteriores», mesmo os grandes (por exemplo, conversas de assistentes).
   * Vibe coding: Copilot CLI, Qwen, Cline, Roo, Goose, Amp, Crush, Kiro,

@@ -46,6 +46,19 @@ class CopyAppTests(SandboxTestCase):
             self.assertTrue(portable.copy_app(self.root), on_disk)
             self.assertEqual(self.app_version_on_disk(), VERSION)
 
+    def test_computer_folders_with_app_like_names_are_never_touched(self):
+        for name in (APP_DIR + ".nova", APP_DIR + ".antiga"):
+            folder = os.path.join(self.root, name, "Cópia atual", "Pasta pessoal")
+            os.makedirs(folder)
+            with open(os.path.join(folder, "tese.docx"), "w") as fh:
+                fh.write("tese")
+        self.fake_disk_copy("0.9.0")
+        self.assertTrue(portable.copy_app(self.root))
+        for name in (APP_DIR + ".nova", APP_DIR + ".antiga"):
+            self.assertTrue(os.path.exists(os.path.join(
+                self.root, name, "Cópia atual", "Pasta pessoal", "tese.docx")), name)
+        self.assertFalse([n for n in os.listdir(self.root) if n.startswith(".sgtmp-")])
+
     def test_never_replaces_a_newer_copy(self):
         self.fake_disk_copy("99.0.0")
         self.assertFalse(portable.copy_app(self.root))

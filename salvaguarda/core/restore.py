@@ -198,19 +198,23 @@ def old_xdg_dirs(meta: Dict[str, Any]) -> Dict[str, str]:
     return result
 
 
-def plan_variants(items: List[RestoreItem],
-                  probe: Optional[variants.Probe] = None) -> Dict[str, variants.Remap]:
-    """Profiles that should go to another packaging of the same app (deb, snap, Flatpak)."""
+def plan_variants(items: List[RestoreItem], probe: Optional[variants.Probe] = None,
+                  tree_root: Optional[str] = None) -> Dict[str, variants.Remap]:
+    """Profiles that should go to another packaging of the same app (deb, snap, Flatpak).
+
+    With ``tree_root``, a remap is left out when the copy itself holds that destination
+    and another selected item restores it (the old snap profile, with «Apps em snap e
+    Flatpak»): two profiles never mix, and both go back to where they were."""
     probe = probe or variants.Probe(paths.home())
-    all_rels = [rel for item in items for rel in item.rels]
+    # Loose files never reach subfolders, so they never restore a profile folder.
+    others = [rel for item in items if item.kind != "loose" for rel in item.rels]
     found: Dict[str, variants.Remap] = {}
     for item in items:
         if item.kind == "preset" and item.key in variants.APP_VARIANTS:
             for remap in variants.plan_remaps(item.key, item.rels, probe):
                 dest = HOME_DIR + "/" + remap.destination
-                if any(rel != remap.rel and _overlaps(rel, dest) for rel in all_rels):
-                    # Another item of the copy restores into that place (the old snap
-                    # profile, with «Apps em snap e Flatpak»): both go back as they were.
+                if (tree_root is not None and os.path.lexists(os.path.join(tree_root, dest))
+                        and any(rel != remap.rel and _overlaps(rel, dest) for rel in others)):
                     continue
                 found[remap.rel] = remap
     return found

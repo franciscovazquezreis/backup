@@ -16,6 +16,10 @@ if ! grep -q "<release version=\"$VERSION\"" "$ROOT/data/$APP_ID.metainfo.xml"; 
     echo "Falta <release version=\"$VERSION\"> em data/$APP_ID.metainfo.xml" >&2
     exit 1
 fi
+if ! grep -q "^\.TH SALVAGUARDA 1 \"[^\"]*\" \"Salvaguarda $VERSION\"" "$ROOT/packaging/salvaguarda.1"; then
+    echo "A página man (packaging/salvaguarda.1) não diz Salvaguarda $VERSION" >&2
+    exit 1
+fi
 OUT="$ROOT/dist"
 WORK=$(mktemp -d)
 PKG="$WORK/$NAME"

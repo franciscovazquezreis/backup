@@ -63,13 +63,22 @@ voltarem ao sítio certo depois de formatares o computador.
 
 Instala o `.deb` novo por cima, da mesma forma (duplo clique ou `sudo apt install ./…`). Não é
 preciso desinstalar nada: as tuas escolhas, o histórico e as cópias no disco ficam como
-estavam. Se a app estiver aberta durante a atualização, volta a abri-la e ela propõe reiniciar
-na versão nova. Na primeira cópia depois de atualizar, se a versão nova deixar de copiar alguma
-coisa (por exemplo, uma pasta de cache que passou a ser excluída), a app pergunta antes; o que
-sair da «Cópia atual» fica em «Versões anteriores».
+estavam.
+
+Para passar da 1.0.0 para a 1.1.0, fecha a Salvaguarda antes de instalar (ou fecha-a e volta a
+abri-la depois). A partir da 1.1.0 já não é preciso: se a app estiver aberta durante a
+atualização, volta a abri-la e ela propõe reiniciar na versão nova.
+
+Na primeira cópia depois de atualizar, se a versão nova deixar de copiar alguma coisa (por
+exemplo, uma pasta de cache que passou a ser excluída), a app pergunta antes; o que sair da
+«Cópia atual» fica em «Versões anteriores». Numa cópia feita com o atalho de teclado não há
+quem responda: a cópia continua e esses itens ficam na «Cópia atual» até decidires na janela.
 
 As versões anteriores do `.deb` ficam na pasta `dist/`, para poderes voltar atrás se for
-preciso. Instalar uma versão mais antiga por cima também não apaga nada.
+preciso. Voltar a uma versão mais antiga não apaga nada no disco, mas tem efeitos: o que só a
+versão nova copiava deixa de ser copiado e passa para «Versões anteriores» (fica lá durante o
+prazo definido), e as definições que só existem na versão nova voltam ao valor por omissão
+quando voltares a instalá-la.
 
 Não precisa de internet: a app usa apenas o Python 3 e o GTK 3, que já vêm instalados no
 Linux Mint e no Ubuntu e, em geral, nos ambientes gráficos baseados em GTK (Cinnamon, GNOME,
@@ -185,7 +194,8 @@ discos montados dentro das pastas escolhidas (adiciona-os como pasta própria se
 
 `salvaguarda --copiar` faz a cópia sem abrir a janela, para o primeiro disco de cópias ligado.
 No Cinnamon, cria um atalho personalizado em Definições do sistema, Teclado, Atalhos, com o
-comando `salvaguarda --copiar`.
+comando `salvaguarda --copiar`. Sem terminal ninguém responde às perguntas: nesse caso a cópia
+escolhe sempre o lado seguro (não retira nada da «Cópia atual») e deixa a decisão para a janela.
 
 ## Limitações conhecidas
 

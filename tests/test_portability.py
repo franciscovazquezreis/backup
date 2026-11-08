@@ -6,6 +6,7 @@ import os
 import shutil
 import tempfile
 import unittest
+import unittest.mock
 
 from salvaguarda.core import desktop as ds
 from salvaguarda.core import inventory as inv
@@ -49,10 +50,18 @@ class VariantTests(TmpCase):
         from salvaguarda.core import restore
 
         os.makedirs(os.path.join(self.root, "snap/firefox/current"))
+        tree = os.path.join(self.tmp, "copia")
+        os.makedirs(os.path.join(tree, "Pasta pessoal/.mozilla"))
         firefox = restore.RestoreItem("Firefox", "preset", "firefox", ["Pasta pessoal/.mozilla"])
         sandboxed = restore.RestoreItem("Apps", "preset", "sandboxed", ["Pasta pessoal/snap"])
-        self.assertTrue(restore.plan_variants([firefox], self.probe()))
-        self.assertEqual(restore.plan_variants([firefox, sandboxed], self.probe()), {})
+        loose = restore.RestoreItem("Soltos", "loose", "home_files", ["Pasta pessoal"])
+        both = [firefox, sandboxed, loose]
+        # The copy has no old snap profile: the deb profile goes to the snap.
+        self.assertTrue(restore.plan_variants(both, self.probe(), tree))
+        os.makedirs(os.path.join(tree, "Pasta pessoal/snap/firefox/common/.mozilla"))
+        self.assertEqual(restore.plan_variants(both, self.probe(), tree), {})
+        # Loose files alone never block a remap.
+        self.assertTrue(restore.plan_variants([firefox, loose], self.probe(), tree))
 
     def test_wrapper_alone_counts_as_snap(self):
         self.touch("/usr/bin/firefox", '#!/bin/sh\nexec /snap/bin/firefox "$@"\n')
@@ -314,6 +323,18 @@ class InventoryTests(TmpCase):
         self.assertNotIn("install -g npm", text)
         # Docker: no socket here, so the docker CLI is never called.
         self.assertFalse(any(c[0] == "docker" for c in runner.calls))
+
+    def test_lm_studio_models_and_readable_problems(self):
+        h = self.home
+        self.touch(".lmstudio/models/lmstudio-community/Qwen3-8B-GGUF/q4.gguf", "x", base=h)
+        self.touch(".bun/install/global/package.json", json.dumps({"dependencies": ["x"]}), base=h)
+        with unittest.mock.patch.object(inv, "section_docker", side_effect=RuntimeError("avaria")):
+            sections = inv.build(h, {}, FakeRunner({}))
+        text = inv.render(sections, "portatil", "Ubuntu", "GNOME", "ana", h, "1.1.0",
+                          _dt.datetime(2026, 11, 8, 14, 0))
+        self.assertIn("lms get lmstudio-community/Qwen3-8B-GGUF", text)
+        self.assertIn("Docker: não foi possível ler (avaria)", text)
+        self.assertNotIn("<lambda>", text)
 
     def test_missing_tools_give_an_empty_but_valid_file(self):
         runner = FakeRunner({})

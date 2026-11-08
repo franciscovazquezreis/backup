@@ -216,10 +216,10 @@ class BackupPage(Gtk.Stack):
                 "{} projetos com trabalho que não está na cópia".format(count)),
                 ("sg-heading",), wrap=True), False, False, 0)
             texts.pack_start(common.label(fmt.agree(
-                count, "Não está no GitHub (ou tem alterações por enviar) e a pasta onde está "
-                       "não é copiada: {}.",
-                "Não estão no GitHub (ou têm alterações por enviar) e as pastas onde estão não "
-                "são copiadas: {}.").format(paths.safe_text(names)), ("sg-dim",), wrap=True),
+                count, "Tem ficheiros ou commits que só existem neste computador e que não vão "
+                       "para a cópia: {}.",
+                "Têm ficheiros ou commits que só existem neste computador e que não vão para "
+                "a cópia: {}.").format(paths.safe_text(names)), ("sg-dim",), wrap=True),
                 False, False, 0)
             box.pack_start(texts, True, True, 0)
             button = Gtk.Button.new_with_mnemonic("_Ver…")

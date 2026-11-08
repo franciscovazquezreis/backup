@@ -11,7 +11,8 @@ from typing import Tuple
 
 from .. import VERSION
 from . import fmt
-from .layout import APP_DIR, README_NAME
+from .layout import (APP_DIR, COMPUTER_META, CURRENT_DIR, README_NAME, TMP_PREFIX,
+                     VERSIONS_DIR)
 
 LAUNCHER_NAME = "Abrir a Salvaguarda.sh"
 
@@ -182,6 +183,14 @@ def _ignore(folder: str, names):
     return [n for n in names if n == "__pycache__" or n.endswith(_TRANSIENT)]
 
 
+def _is_app_copy(path: str) -> bool:
+    """Only a copy of the app itself: never a folder that holds a computer's backups."""
+    return (os.path.isdir(os.path.join(path, "salvaguarda"))
+            and not os.path.lexists(os.path.join(path, COMPUTER_META))
+            and not os.path.lexists(os.path.join(path, CURRENT_DIR))
+            and not os.path.lexists(os.path.join(path, VERSIONS_DIR)))
+
+
 def copy_app(root: str) -> bool:
     """Put a runnable copy of the app on the disk. Returns True when it was updated.
 
@@ -201,11 +210,16 @@ def copy_app(root: str) -> bool:
         on_disk = ""
     if on_disk and version_key(on_disk) >= version_key(VERSION):
         return False
-    staging = target + ".nova"
-    old = target + ".antiga"
+    # Hidden working names: a computer folder can never be called like this (names that
+    # start with a dot are refused), so these folders are never someone's backups.
+    staging = os.path.join(root, TMP_PREFIX + "aplicacao-nova")
+    old = os.path.join(root, TMP_PREFIX + "aplicacao-antiga")
     for leftover in (staging, old):
         if os.path.lexists(leftover):
             shutil.rmtree(leftover, ignore_errors=True)
+    for legacy in (target + ".nova", target + ".antiga"):  # left by version 1.0.0
+        if _is_app_copy(legacy):
+            shutil.rmtree(legacy, ignore_errors=True)
     os.makedirs(staging)
     try:
         shutil.copytree(source, os.path.join(staging, "salvaguarda"), ignore=_ignore)

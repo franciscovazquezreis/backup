@@ -76,6 +76,15 @@ def desktop_in_header(text: str) -> Optional[str]:
     return None
 
 
+def export_source(text: str, recorded: str = "") -> str:
+    """Desktop an export comes from: its own header first, then ``recorded`` (the
+    metadata of the latest backup), then a guess from its sections. "" when unknown."""
+    header = desktop_in_header(text)
+    if header is not None:
+        recorded = header
+    return recorded or desktop_of_dump(split_dump(text))
+
+
 def desktop_of_dump(sections: Sequence[Tuple[str, List[str]]]) -> str:
     """Guess the desktop that wrote a dump (disks from version 1.0.0 do not record it)."""
     names = {name for name, _ in sections}
@@ -238,10 +247,7 @@ class DesktopPlan:
     def __init__(self, text: str, source_desktop: str, here: str, home: str,
                  pairs: Sequence[Tuple[str, str]] = (), root: str = "/"):
         self.sections = split_dump(text)
-        recorded = desktop_in_header(text)
-        if recorded is not None:  # the export says where it comes from: trust it first
-            source_desktop = recorded
-        self.source = source_desktop or desktop_of_dump(self.sections)
+        self.source = export_source(text, source_desktop)
         self.here = here
         self.same_desktop = bool(self.source) and self.source == here
         self.unknown = not self.source or not here

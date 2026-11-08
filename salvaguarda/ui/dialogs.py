@@ -333,7 +333,7 @@ class PreferencesDialog(Gtk.Dialog):
             reset = Gtk.Button.new_with_label("Voltar a avisar")
             reset.connect("clicked", lambda b: (s.ignored_projects.clear(), b.set_sensitive(False)))
             listbox.add(common.row("Projetos ignorados: {}".format(len(s.ignored_projects)),
-                                   ", ".join(s.ignored_projects[:5]), None, reset))
+                                   paths.safe_text(", ".join(s.ignored_projects[:5])), None, reset))
         self.apps_switch = Gtk.Switch()
         self.apps_switch.set_active(s.warn_open_apps)
         listbox.add(common.row("Avisar se o navegador ou o e-mail estiverem abertos",

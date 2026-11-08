@@ -45,6 +45,7 @@ class RestorePage(Gtk.Stack):
         self.items: List[restore.RestoreItem] = []
         self.meta: Dict[str, object] = {}
         self.variant_plan: Dict[str, variants.Remap] = {}
+        self.snap_plan: Dict[str, str] = {}
         self.inventory_paths: List[str] = []
         self.checks: Dict[int, Gtk.CheckButton] = {}
         self._size_cancel = threading.Event()
@@ -202,7 +203,7 @@ class RestorePage(Gtk.Stack):
         self.folder_button = Gtk.FileChooserButton.new("Pasta de destino", Gtk.FileChooserAction.SELECT_FOLDER)
         self.folder_button.set_current_folder(paths.home())
         self.folder_button.set_sensitive(False)
-        self.to_folder.connect("toggled", lambda b: self.folder_button.set_sensitive(b.get_active()))
+        self.to_folder.connect("toggled", lambda b: self._on_target_changed())
         where.pack_start(self.to_original, False, False, 2)
         where.pack_start(common.hbox(10, self.to_folder, self.folder_button), False, False, 2)
         box.pack_start(where, False, False, 0)
@@ -241,12 +242,20 @@ class RestorePage(Gtk.Stack):
         self._fill_items()
         box.show_all()
 
+    def _on_target_changed(self) -> None:
+        """Remaps, snap warnings and desktop settings exist only for the original places."""
+        self.folder_button.set_sensitive(self.to_folder.get_active())
+        self._fill_items(keep_choices=True)
+
     def _on_when_changed(self) -> None:
         latest = self.when.get_active() <= 0
         (self.conflict_replace if latest else self.conflict_skip).set_active(True)
         self._fill_items()
 
-    def _fill_items(self) -> None:
+    def _fill_items(self, keep_choices: bool = False) -> None:
+        chosen = {(item.kind, item.key): self.checks[i].get_active()
+                  for i, item in enumerate(getattr(self, "items", [])) if i in self.checks} \
+            if keep_choices else {}
         for child in self.items_section.get_children()[1:]:
             self.items_section.remove(child)
             child.destroy()
@@ -258,7 +267,9 @@ class RestorePage(Gtk.Stack):
         self.inventory_paths = [os.path.join(tree, rel) for item in found if item.is_inventory
                                 for rel in item.exports if os.path.isfile(os.path.join(tree, rel))]
         self.items = [item for item in found if not item.is_inventory]
-        self.variant_plan = restore.plan_variants(self.items)
+        original = self.to_original.get_active()
+        self.variant_plan = restore.plan_variants(self.items, tree_root=tree) if original else {}
+        self.snap_plan = restore.snap_warnings(self.items, self.variant_plan) if original else {}
         self.checks = {}
         if self.inventory_paths:
             inventory = Gtk.Button.new_with_mnemonic("Ver a _lista de programas que estavam instalados")
@@ -270,8 +281,13 @@ class RestorePage(Gtk.Stack):
             inventory.connect("clicked", lambda *_: common.open_path(path))
             self.items_section.pack_start(inventory, False, False, 0)
         if not self.items:
-            self.items_section.pack_start(common.label("Esta cópia está vazia.", ("sg-dim",)), False, False, 4)
+            text = ("Nesta data só mudou a lista de programas instalados." if self.inventory_paths
+                    else "Esta cópia está vazia.")
+            self.items_section.pack_start(common.label(text, ("sg-dim",)), False, False, 4)
             self.items_section.show_all()
+            self.settings_check.set_visible(False)
+            self.settings_hint.hide()
+            self._update_button()
             return
         toggles = common.hbox(4)
         for text, value in (("Tudo", True), ("Nada", False)):
@@ -284,7 +300,7 @@ class RestorePage(Gtk.Stack):
         size_labels = {}
         for index, item in enumerate(self.items):
             check = Gtk.CheckButton()
-            check.set_active(True)
+            check.set_active(chosen.get((item.kind, item.key), True))
             check.connect("toggled", lambda *_: self._update_button())
             self.checks[index] = check
             size = common.label("…", ("sg-dim", "sg-small"), xalign=1.0)
@@ -294,6 +310,9 @@ class RestorePage(Gtk.Stack):
             if item.is_settings_export and not item.rels:
                 subtitle = "Painel, atalhos de teclado, aparência e applets"
             for rel in item.rels:
+                if rel in self.snap_plan:
+                    subtitle = self.snap_plan[rel]
+                    break
                 remap = self.variant_plan.get(rel)
                 if remap is None:
                     continue
@@ -311,19 +330,36 @@ class RestorePage(Gtk.Stack):
         listbox.connect("row-activated", lambda lb, r: r.check.set_active(not r.check.get_active()))
         self.items_section.pack_start(listbox, False, False, 6)
         self.items_section.show_all()
-        has_settings = any(i.is_settings_export for i in self.items)
+        has_settings = original and any(i.is_settings_export for i in self.items)
         self.settings_check.set_visible(has_settings)
-        source = str(self.meta.get("ambiente") or "")
-        here = desktop.current_desktop(processes=system.running_process_names())
-        if has_settings and source and here and source != here:
-            self.settings_hint.set_text(
-                "A cópia foi feita no {} e este computador usa {}: só são aplicadas as "
-                "definições das apps.".format(desktop.label(source), desktop.label(here)))
-            self.settings_hint.show()
-        else:
-            self.settings_hint.hide()
+        hint = self._settings_hint(tree) if has_settings else ""
+        self.settings_hint.set_text(hint)
+        self.settings_hint.set_visible(bool(hint))
         self._measure(tree, size_labels)
         self._update_button()
+
+    def _settings_hint(self, tree: str) -> str:
+        """The same decision as the restore engine (desktop.DesktopPlan), said in advance."""
+        latest = self.when.get_active() <= 0
+        recorded = str(self.meta.get("ambiente") or "") if latest else ""
+        text = ""
+        for item in self.items:
+            for rel in item.settings_exports:
+                try:
+                    with open(os.path.join(tree, rel), encoding="utf-8", errors="replace") as fh:
+                        text = fh.read(8 << 20)
+                except OSError:
+                    continue
+                break
+        source = desktop.export_source(text, recorded) if text else recorded
+        here = desktop.current_desktop(processes=system.running_process_names())
+        if source and here and source == here:
+            return ""
+        if source and here:
+            return ("A cópia foi feita no {} e este computador usa {}: só são aplicadas as "
+                    "definições das apps.".format(desktop.label(source), desktop.label(here)))
+        return ("Não foi possível confirmar que este computador usa o mesmo ambiente de "
+                "trabalho da cópia: só são aplicadas as definições das apps.")
 
     def _measure(self, tree: str, labels: Dict[int, Gtk.Label]) -> None:
         cancel = self._size_cancel
@@ -357,7 +393,7 @@ class RestorePage(Gtk.Stack):
 
     def _show_size(self, labels, index, files, size, cancel) -> bool:
         if not cancel.is_set() and index in labels:
-            if not self.items[index].rels if index < len(self.items) else False:
+            if index < len(self.items) and not self.items[index].rels:
                 labels[index].set_text("")  # only settings: nothing to measure
                 return False
             labels[index].set_text(fmt.size(size) if files else "vazio")
@@ -446,6 +482,8 @@ class RestorePage(Gtk.Stack):
             selected_rels = {rel for item in items for rel in item.rels}
             remaps = {rel: r for rel, r in self.variant_plan.items() if rel in selected_rels}
             warnings = [w for r in remaps.values() for w in r.warnings]
+            warnings += [w for rel, w in self.snap_plan.items()
+                         if rel in selected_rels and w not in warnings]
             if warnings:
                 answer = common.choose(
                     self.window, "Alguns perfis não vão para a app instalada",

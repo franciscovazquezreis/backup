@@ -352,8 +352,9 @@ def section_node(home: str) -> Optional[Section]:
                         (os.path.join(home, ".local/share/pnpm/global/5/package.json"), "pnpm")):
         data = _json(path)
         if isinstance(data, dict):
-            for pkg, version in sorted((data.get("dependencies") or {}).items()):
-                s.rows.append((pkg, str(version), where))
+            deps = data.get("dependencies")
+            for pkg, version in sorted(deps.items() if isinstance(deps, dict) else ()):
+                s.rows.append((str(pkg), str(version), where))
     if not s.rows:
         return None
     npm = sorted({row[0] for row in s.rows if row[2].startswith(("npm", "nvm", "fnm"))})
@@ -548,6 +549,32 @@ def section_ollama(home: str) -> Optional[Section]:
     return s
 
 
+def section_lmstudio(home: str) -> Optional[Section]:
+    """Models downloaded in LM Studio: <models>/<publisher>/<model>/<files>."""
+    models = []
+    for base in (os.path.join(home, ".lmstudio/models"),
+                 os.path.join(home, ".cache/lm-studio/models")):
+        try:
+            publishers = sorted(e for e in os.scandir(base) if e.is_dir(follow_symlinks=False))
+        except OSError:
+            continue
+        for publisher in publishers:
+            try:
+                names = sorted(e.name for e in os.scandir(publisher.path)
+                               if e.is_dir(follow_symlinks=False))
+            except OSError:
+                continue
+            for name in names:
+                models.append((publisher.name + "/" + name, base.replace(home, "~", 1)))
+    if not models:
+        return None
+    s = Section("Modelos do LM Studio", "Não são copiados. Voltam a ser descarregados na própria "
+                "app (separador «Descobrir») ou com «lms get».", header=("Modelo", "Pasta"))
+    s.rows = sorted(set(models))
+    s.commands = ["lms get " + m for m, _ in s.rows]
+    return s
+
+
 # -------------------------------------------------------- editor extensions
 _EDITORS = (
     ("VS Code", "code", ".vscode/extensions"),
@@ -631,20 +658,26 @@ def build(home: str, xdg: Dict[str, str], runner: Optional[Runner] = None,
           project_roots: Sequence[str] = ()) -> List[Section]:
     r = runner or Runner()
     sections: List[Optional[Section]] = []
-    steps: List[Callable[[], object]] = [
-        lambda: section_apt(r), lambda: section_snap(r), lambda: section_flatpak(r),
-        lambda: section_node(home), lambda: section_python(home), lambda: section_cargo(home),
-        lambda: section_go(r, home), lambda: section_appimages(home, xdg),
-        lambda: section_manual_installs(r), lambda: section_docker(r),
-        lambda: section_ollama(home), lambda: section_editors(home),
-        lambda: section_crontab(r), lambda: section_systemd_user(home), section_hosts,
-        lambda: section_venvs(home, project_roots), lambda: section_outside_data(home),
+    steps: List[Tuple[str, Callable[[], object]]] = [
+        ("Pacotes do sistema", lambda: section_apt(r)), ("Snap", lambda: section_snap(r)),
+        ("Flatpak", lambda: section_flatpak(r)), ("Node.js", lambda: section_node(home)),
+        ("Python", lambda: section_python(home)), ("Rust", lambda: section_cargo(home)),
+        ("Go", lambda: section_go(r, home)), ("AppImages", lambda: section_appimages(home, xdg)),
+        ("Instalações à mão", lambda: section_manual_installs(r)),
+        ("Docker", lambda: section_docker(r)), ("Ollama", lambda: section_ollama(home)),
+        ("LM Studio", lambda: section_lmstudio(home)),
+        ("Extensões dos editores", lambda: section_editors(home)),
+        ("Tarefas agendadas", lambda: section_crontab(r)),
+        ("Serviços do utilizador", lambda: section_systemd_user(home)),
+        ("Ficheiro hosts", section_hosts),
+        ("Ambientes Python dos projetos", lambda: section_venvs(home, project_roots)),
+        ("Dados fora da cópia", lambda: section_outside_data(home)),
     ]
-    for step in steps:
+    for name, step in steps:
         try:
             got = step()
         except Exception as exc:  # one broken section never stops the backup
-            r.problems.append("{}: {}".format(getattr(step, "__name__", "secção"), exc))
+            r.problems.append("{}: não foi possível ler ({})".format(name, exc))
             continue
         if isinstance(got, list):
             sections.extend(got)
@@ -795,7 +828,8 @@ def section_venvs(home: str, project_roots: Sequence[str]) -> Optional[Section]:
             if not reqs:
                 continue
             shown = venv.replace(home, "~", 1)
-            s.notes.append("{} ({} pacotes)".format(shown, len(reqs)))
+            s.notes.append("{} ({})".format(
+                shown, "1 pacote" if len(reqs) == 1 else "{} pacotes".format(len(reqs))))
             s.raw += "# {}\n{}\n\n".format(shown, "\n".join(reqs))
     return s if s.notes else None
 
