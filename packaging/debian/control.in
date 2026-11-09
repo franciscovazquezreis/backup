@@ -1,0 +1,19 @@
+Package: salvaguarda
+Version: @VERSION@
+Architecture: all
+Maintainer: franciscovazquezreis <franciscovazquezreis@users.noreply.github.com>
+Installed-Size: @SIZE@
+Depends: python3 (>= 3.8), python3-gi, gir1.2-gtk-3.0
+Recommends: dconf-cli, pkexec | policykit-1
+Suggests: gnome-disk-utility
+Section: utils
+Priority: optional
+Homepage: https://github.com/franciscovazquezreis/backup
+Description: cópias de segurança simples para um disco externo
+ A Salvaguarda copia as pastas escolhidas (pastas pessoais, projetos de
+ programação e configurações de apps) para um disco externo, com as mesmas
+ pastas, datas e permissões. Cada cópia só transfere o que mudou e o que for
+ apagado ou substituído no computador fica em "Versões anteriores".
+ .
+ Inclui um restauro guiado para depois de formatar o computador e funciona
+ sem internet.

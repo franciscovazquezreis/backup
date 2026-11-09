@@ -1,0 +1,43 @@
+salvaguarda (1.1.0) unstable; urgency=medium
+
+  * Atualização por cima da versão anterior sem perder nada: a configuração
+    guarda chaves de versões mais recentes, o histórico tolera formatos
+    diferentes, a cópia da app no disco nunca volta a uma versão anterior e,
+    nas atualizações seguintes, se a app estiver aberta, propõe reiniciar
+    (para passar da 1.0.0 para esta, fecha a app antes de instalar).
+  * Primeira cópia depois de atualizar: pergunta antes de tirar alguma coisa
+    da «Cópia atual» (sem terminal, mantém tudo e a cópia continua); discos
+    preparados por uma versão mais recente são recusados em vez de mal
+    interpretados.
+  * Pastas selecionadas que são ligações simbólicas (stow, outra partição,
+    snap) ficam sempre com o conteúdo na cópia; o restauro nunca cria
+    ~/snap/<app>/current como pasta real e segue ligações que já existam.
+  * Procura de projetos fora da cópia: repositórios com filtros do git que
+    não se conseguem desligar não são verificados.
+  * Ficheiros apagados de configurações de apps ficam sempre em «Versões
+    anteriores», mesmo os grandes (por exemplo, conversas de assistentes).
+  * Vibe coding: Copilot CLI, Qwen, Cline, Roo, Goose, Amp, Crush, Kiro,
+    Trae, Void, conversas do Zed, app do Claude, Ollama e LM Studio (sem
+    modelos), Jupyter, n8n, contas de nuvem e publicação, serviços do
+    utilizador e mais configurações de gestores de pacotes.
+  * Lista de programas instalados em Extras/programas-instalados.md, com os
+    comandos para os voltar a instalar noutro sistema.
+  * Mudança de distribuição: perfis do Firefox, Thunderbird, Chromium, Brave,
+    VS Code e LibreOffice vão para a versão instalada (.deb, snap ou
+    Flatpak); definições do ambiente de trabalho guardadas antes de aplicar
+    e filtradas quando o ambiente é outro; pastas pessoais e ligações
+    simbólicas seguem o utilizador e o idioma novos.
+  * Correção: restaurar as definições do ambiente de trabalho também
+    restaura os ficheiros desse item (atalhos, marcadores, applets).
+  * Pacote: preinst e rtupdate para limpar código compilado, md5sums e
+    verificação de versão ao construir.
+
+ -- franciscovazquezreis <franciscovazquezreis@users.noreply.github.com>  Sun, 08 Nov 2026 17:00:00 +0000
+
+salvaguarda (1.0.0) unstable; urgency=medium
+
+  * Primeira versão: cópia em espelho com versões anteriores, catálogo de
+    configurações de apps, exclusões para projetos de programação, restauro
+    guiado e cópia portátil da app no disco.
+
+ -- franciscovazquezreis <franciscovazquezreis@users.noreply.github.com>  Fri, 16 Oct 2026 17:00:00 +0100

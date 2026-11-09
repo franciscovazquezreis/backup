@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Salvaguarda
+GenericName=Cópias de segurança
+Comment=Copia as tuas pastas para um disco externo, tal e qual
+Exec=salvaguarda
+Icon=io.github.franciscovazquezreis.Salvaguarda
+Terminal=false
+Categories=Utility;Archiving;GTK;
+Keywords=backup;cópia;segurança;restaurar;disco;externo;salvaguarda;
+StartupNotify=true
+StartupWMClass=io.github.franciscovazquezreis.Salvaguarda
